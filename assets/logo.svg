@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect x="12" y="12" width="104" height="104" rx="24" fill="#182232" stroke="#3b4d68" stroke-width="3"/>
+  <!-- Top bar: Image Quota (amber/emerald gauge) -->
+  <rect x="26" y="28" width="76" height="14" rx="7" fill="#2a364b"/>
+  <rect x="26" y="28" width="52" height="14" rx="7" fill="#f9ab00"/>
+  <!-- Middle: Dual Model Pools (Pool A blue + Pool B purple) -->
+  <rect x="26" y="54" width="35" height="16" rx="5" fill="#4c8df6"/>
+  <rect x="67" y="54" width="35" height="16" rx="5" fill="#c58af9"/>
+  <!-- Bottom: Context dot grid -->
+  <g fill="#81c995">
+    <circle cx="32" cy="88" r="5"/>
+    <circle cx="48" cy="88" r="5"/>
+    <circle cx="64" cy="88" r="5"/>
+    <circle cx="80" cy="88" r="5" fill="#4c8df6"/>
+    <circle cx="96" cy="88" r="5" fill="#475569"/>
+  </g>
+</svg>

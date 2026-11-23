@@ -1,0 +1,18 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "配额与上下文",
+  "description": "实时查看生图配额（5h窗口与429官方倒计时）、当前双模型池余量（池A Gemini / 池B Claude）以及当前会话精确上下文用量。",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "配额与上下文",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "配额与上下文"
+      }
+    ]
+  }
+}

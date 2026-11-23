@@ -1,0 +1,19 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Runtime sidecar data & temporary files
+.data/
+*.tmp.*
+image-scan-cache.json
+model-catalog.json
+settings.json
+
+# Node / OS / Editor artifacts
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
