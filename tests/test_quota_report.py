@@ -641,6 +641,69 @@ class QuotaReportTests(unittest.TestCase):
         self.assertEqual(anc["used_pct"], anc["calls_pct"])
         self.assertEqual(rep["window_5h"]["used_pct_basis"], "calls")
 
+    def test_weekly_rolling_schedule_and_weekly_429_isolation(self) -> None:
+        # Spread calls across 6.5 days ago (rolls off in 12h), 5.5 days ago (rolls off in 36h), and 1h ago
+        t_d1 = int(self.now - 6.5 * 86400)
+        t_d2 = int(self.now - 5.5 * 86400)
+        t_now = int(self.now - 3600)
+        weekly_reset_ts = self.now + 36 * 3600  # 36h lockout -> must classify as 429_WEEKLY (>6h)
+        err_weekly = json.dumps({
+            "error": {
+                "code": 429,
+                "message": "QUOTA_EXHAUSTED: Weekly image capacity reached.",
+                "details": [{
+                    "metadata": {
+                        "model": "gemini-3.1-flash-image",
+                        "quotaResetTimeStamp": iso_utc(weekly_reset_ts),
+                    },
+                    "retryDelay": "129600s",
+                }],
+            }
+        })
+        rows = [
+            (1, 91, 3, make_metadata(t_d1, args={"ImageName": "w_old_1", "ImagePaths": ["/r.png"]}), None),
+            (2, 91, 3, make_metadata(t_d1 + 300, args={"ImageName": "w_old_2", "ImagePaths": ["/r.png"]}), None),
+            (3, 91, 3, make_metadata(t_d2, args={"ImageName": "w_mid_1", "ImagePaths": ["/r.png"]}), None),
+            (4, 91, 3, make_metadata(t_now, args={"ImageName": "w_recent_1", "ImagePaths": ["/r.png"]}), None),
+            (5, 91, 4, make_metadata(int(self.now - 120), end_ts=int(self.now - 118), args={"ImageName": "w_hit"}), make_error_details(err_weekly)),
+        ]
+        create_conv_db(self.conv_dir / "conv-weekly.db", rows, self.now - 10)
+
+        rep = quota_report.build_report(self.conv_dir, now=self.now)
+        w5 = rep["window_5h"]
+        wrs = rep["weekly_rolling_schedule"]
+        cal = rep["calibration"]
+
+        # Weekly 429 must NOT pollute 5h calibration or 5h lock state
+        self.assertFalse(w5["cooldown_active"])
+        self.assertTrue(w5["weekly_cooldown_active"])
+        self.assertEqual(w5["rate_limited"], 0)
+        self.assertEqual(w5["weekly_rate_limited"], 1)
+        self.assertEqual(cal["observed_lock_count"], 0)
+        self.assertEqual(cal["weekly_lock_count"], 1)
+        self.assertEqual(cal["avg_attempts_at_weekly_lock"], 4.0)
+
+        # Weekly rolling schedule groups 4 billable calls by day and honors active weekly reset
+        self.assertTrue(wrs["cooldown_active"])
+        self.assertEqual(wrs["total_calls"], 4)
+        self.assertEqual(wrs["first_batch"]["calls"], 2)
+        self.assertEqual(wrs["recover_next_24h"]["calls"], 2)
+        self.assertEqual(wrs["recover_next_48h"]["calls"], 3)
+        self.assertGreaterEqual(len(wrs["buckets"]), 2)
+        self.assertEqual(wrs["buckets"][-1]["cum_calls"], 4)
+        self.assertEqual(wrs["buckets"][-1]["cum_pct"], 100.0)
+        self.assertAlmostEqual(wrs["next_recover_ts"], weekly_reset_ts, delta=2.0)
+
+        # Newer OK after weekly 429 lifts weekly_cooldown_active
+        rows_lift = [
+            (1, 91, 3, make_metadata(int(self.now - 30), args={"ImageName": "w_lifted"}), None),
+        ]
+        create_conv_db(self.conv_dir / "conv-weekly-lift.db", rows_lift, self.now - 5)
+        rep2 = quota_report.build_report(self.conv_dir, now=self.now)
+        self.assertFalse(rep2["window_5h"]["weekly_cooldown_active"])
+        self.assertFalse(rep2["weekly_rolling_schedule"]["cooldown_active"])
+        self.assertAlmostEqual(rep2["weekly_rolling_schedule"]["next_recover_ts"], t_d1 + quota_report.WINDOW_7D_SEC, delta=2.0)
+
     def test_context_report_import_sanity(self) -> None:
         self.assertTrue(callable(context_report.load))
         self.assertTrue(callable(context_report.collect_stats))

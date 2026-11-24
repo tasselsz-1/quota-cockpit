@@ -25,20 +25,31 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
-import { buildPoolsPayload, resolveActivePool } from './pools_logic.mjs';
+import {
+  buildPoolsPayload,
+  createEmptyQuotaHistory,
+  enrichPoolsWithWeeklyRecovery,
+  normalizeQuotaHistory,
+  recordQuotaSnapshot,
+  resolveActivePool,
+} from './pools_logic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_SCRIPT = join(HERE, 'context_report.py');
 const QUOTA_SCRIPT = join(HERE, 'quota_report.py');
+const POOL_USAGE_SCRIPT = join(HERE, 'pool_usage_report.py');
 const GEMINI_DIR = process.env.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini');
 const CONVERSATIONS = join(GEMINI_DIR, 'antigravity', 'conversations');
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
 const CATALOG_PATH = join(DATA_DIR, 'model-catalog.json');
 const SETTINGS_PATH = join(DATA_DIR, 'settings.json');
 const IMAGE_CACHE_PATH = join(DATA_DIR, 'image-scan-cache.json');
+const POOL_USAGE_CACHE_PATH = join(DATA_DIR, 'pool-usage-cache.json');
+const QUOTA_HISTORY_PATH = join(DATA_DIR, 'quota-history.json');
 
 const POOLS_TTL_MS = 30 * 1000;
 const POOLS_RETRY_MS = 5 * 1000;
+const POOL_USAGE_TTL_MS = 30 * 1000;
 const IMAGE_TTL_MS = 12 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -134,6 +145,72 @@ function saveSettings(next) {
 
 let currentSettings = loadSettings();
 
+// --- persistent official quota snapshot history -------------------------------
+
+function loadQuotaHistory() {
+  try {
+    if (existsSync(QUOTA_HISTORY_PATH)) {
+      return normalizeQuotaHistory(JSON.parse(readFileSync(QUOTA_HISTORY_PATH, 'utf8')));
+    }
+  } catch {
+    // fallback to empty history
+  }
+  return createEmptyQuotaHistory();
+}
+
+function saveQuotaHistory(hist) {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${QUOTA_HISTORY_PATH}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(hist), 'utf8');
+    renameSync(tmp, QUOTA_HISTORY_PATH);
+  } catch (err) {
+    console.error('[quota-cockpit] Failed to persist quota history:', err.message);
+  }
+}
+
+let quotaHistory = loadQuotaHistory();
+
+// --- local 7-day per-pool usage scanner (cold-start for weekly recovery) ------
+
+let poolUsageCache = { fetchedAt: 0, data: null };
+let poolUsageInFlight = null;
+
+async function getPoolUsageReport(force = false) {
+  const now = Date.now();
+  if (!force && poolUsageCache.data && (now - poolUsageCache.fetchedAt) < POOL_USAGE_TTL_MS) {
+    return poolUsageCache.data;
+  }
+  if (!force && poolUsageInFlight) {
+    return poolUsageInFlight;
+  }
+  const promise = (async () => {
+    mkdirSync(DATA_DIR, { recursive: true });
+    const { cmd, pre } = await findPython();
+    const args = [
+      ...pre,
+      POOL_USAGE_SCRIPT,
+      '--conv-dir', CONVERSATIONS,
+      '--cache', POOL_USAGE_CACHE_PATH,
+    ];
+    const out = await run(cmd, args, 25000);
+    const parsed = JSON.parse(out);
+    poolUsageCache = { fetchedAt: Date.now(), data: parsed };
+    return parsed;
+  })();
+  poolUsageInFlight = promise;
+  try {
+    return await promise;
+  } catch (err) {
+    console.error('[quota-cockpit] Pool usage scan unavailable:', err.message);
+    return poolUsageCache.data;
+  } finally {
+    if (poolUsageInFlight === promise) {
+      poolUsageInFlight = null;
+    }
+  }
+}
+
 // --- language server RPC & live model pools -----------------------------------
 
 function lsRequest(method, body) {
@@ -193,15 +270,17 @@ async function refreshPools(force = false) {
 
   poolsInFlight = (async () => {
     try {
-      const [modelsResult, summaryResult] = await Promise.allSettled([
+      const [modelsResult, summaryResult, usageResult] = await Promise.allSettled([
         lsRequest('GetAvailableModels', {
           metadata: { ideName: 'antigravity', extensionName: 'antigravity' },
         }),
         lsRequest('RetrieveUserQuotaSummary', {}),
+        getPoolUsageReport(force),
       ]);
 
       const modelsResp = modelsResult.status === 'fulfilled' ? modelsResult.value : null;
       const summaryResp = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+      const poolUsageResp = usageResult.status === 'fulfilled' ? usageResult.value : null;
 
       if (!modelsResp && !summaryResp) {
         const msg = modelsResult.reason?.message || summaryResult.reason?.message || 'RPC unavailable';
@@ -216,7 +295,16 @@ async function refreshPools(force = false) {
       }
 
       const models = modelsResp?.response?.models || modelsResp?.models || {};
-      const { catalog, payload } = buildPoolsPayload(models, summaryResp);
+      const nowMs = Date.now();
+      const nowSec = Math.floor(nowMs / 1000);
+      const { catalog, payload } = buildPoolsPayload(models, summaryResp, nowMs);
+
+      const snap = recordQuotaSnapshot(quotaHistory, payload, nowSec);
+      if (snap.changed) {
+        quotaHistory = snap.history;
+        saveQuotaHistory(quotaHistory);
+      }
+      const enrichedPayload = enrichPoolsWithWeeklyRecovery(payload, quotaHistory, poolUsageResp, nowSec);
 
       if (Object.keys(catalog).length > 0) {
         mkdirSync(DATA_DIR, { recursive: true });
@@ -236,7 +324,7 @@ async function refreshPools(force = false) {
         }
       }
 
-      poolsCache = payload;
+      poolsCache = enrichedPayload;
       poolsFetchedAt = Date.now();
       poolsLastError = '';
       return poolsCache;

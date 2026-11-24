@@ -238,6 +238,7 @@
   .tag.OK { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
   .tag.EOF, .tag.E429_RPM { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
   .tag.E429, .tag.ERR { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .tag.E429_WEEKLY { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent); background: color-mix(in srgb, var(--bad) 12%, transparent); }
   .tag.CLIENT_ERR { color: var(--dim); border-color: var(--line); }
   .tag.RUNNING { color: var(--pool-a); border-color: color-mix(in srgb, var(--pool-a) 45%, transparent); }
 
@@ -256,9 +257,25 @@
     display: grid; grid-template-columns: 74px 1fr auto; align-items: center; gap: 7px;
     font-size: 11px;
   }
+  .rec-row {
+    display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 7px;
+    font-size: 11px;
+  }
+  .rec-sub {
+    margin-top: 3px; font-size: 10.5px; color: var(--dim);
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
+  }
+  .rec-sub strong { color: var(--fg); font-weight: 600; }
+  .rec-panel {
+    margin-top: 7px; padding-top: 7px;
+    border-top: 1px dashed color-mix(in srgb, var(--line) 85%, transparent);
+  }
   .roll-time { color: var(--dim); white-space: nowrap; }
   .roll-bar { height: 7px; border-radius: 999px; background: var(--track); overflow: hidden; }
   .roll-fill { height: 100%; border-radius: 999px; background: var(--ok); min-width: 3px; }
+  .roll-fill.pool-a { background: var(--pool-a); }
+  .roll-fill.pool-b { background: var(--pool-b); }
+  .roll-fill.pool-c { background: var(--pool-c); }
   .roll-val { color: var(--fg); white-space: nowrap; text-align: right; }
 
   .band-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
@@ -456,6 +473,13 @@
     const d = new Date(ts * 1000);
     const pad = (x) => String(x).padStart(2, '0');
     return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fmtMD(ts) {
+    if (!ts || ts <= 0) return '--';
+    const d = new Date(ts * 1000);
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
   function fmtDuration(sec, zeroText = '已重置') {
@@ -664,6 +688,9 @@
 
   function imgStatusMeta(w5, anchor) {
     if (!w5) return { pill: '', text: '未知', big: '', mode: '' };
+    if (w5.weekly_cooldown_active) {
+      return { pill: 'bad', text: '周池 429 冷却', big: 'bad', mode: '官方周池 429 锁定' };
+    }
     if (w5.cooldown_active || w5.health === 'locked') {
       return { pill: 'bad', text: '429 冷却中', big: 'bad', mode: '官方 429 锁定窗口' };
     }
@@ -687,11 +714,97 @@
   }
 
   function eventTagInfo(kind) {
+    if (kind === '429_WEEKLY') return { cls: 'E429_WEEKLY', text: '周429', tip: '7 天周配额耗尽（跨日冷却）' };
     if (kind === '429') return { cls: 'E429', text: '429', tip: '5h 配额耗尽 (QUOTA_EXHAUSTED)' };
     if (kind === '429_RPM') return { cls: 'E429_RPM', text: 'RPM', tip: '突发每分钟速率限流 (已与 5h 池剥离)' };
     if (kind === 'CLIENT_ERR') return { cls: 'CLIENT_ERR', text: '参数错', tip: '本地参数校验失败 (未发往服务端、不扣配额)' };
     if (kind === 'RUNNING') return { cls: 'RUNNING', text: '生成中', tip: '进行中' };
     return { cls: kind || 'ERR', text: kind || 'ERR', tip: kind || '' };
+  }
+
+  function weeklyRecSourceMeta(rec) {
+    if (!rec) return { pill: '', text: '' };
+    if (rec.source === 'snapshot') return { pill: 'ok', text: '快照实测' };
+    if (rec.source === 'hybrid') return { pill: 'pool-a', text: '实测+估算' };
+    if (rec.source === 'local_estimate') return { pill: 'warn', text: '7d冷启动估算' };
+    if (rec.source === 'full') return { pill: 'ok', text: '满额' };
+    return { pill: '', text: '官方参考' };
+  }
+
+  function renderPoolWeeklyRecoveryOverview(rec) {
+    if (!rec || rec.source === 'full' || Number(rec.usedPct || 0) <= 0.05) return '';
+    const sm = weeklyRecSourceMeta(rec);
+    const obs = rec.observedRecovery || {};
+    let leftHtml = '';
+    if (obs.isActive) {
+      const ratePart = obs.ratePctPerHour > 0 ? ` +${obs.ratePctPerHour}%/h` : '';
+      leftHtml = `<span style="color:var(--ok);font-weight:600">回血中${ratePart}</span>${rec.recoverNext24hPct >= 0.1 ? ` · 24h预计 +${rec.recoverNext24hPct.toFixed(1)}%` : ''}`;
+    } else if (Number(rec.recoverNext24hPct || 0) >= 0.1) {
+      leftHtml = `24h周回血 <strong>+${Number(rec.recoverNext24hPct).toFixed(1)}%</strong>${Number(rec.recoverNext48hPct || 0) > Number(rec.recoverNext24hPct || 0) + 0.05 ? ` · 48h +${Number(rec.recoverNext48hPct).toFixed(1)}%` : ''}`;
+    } else if (rec.nextRecoverTs > 0) {
+      leftHtml = `下批周回血 <strong>${fmtMD(rec.nextRecoverTs)}</strong> (+${Number(rec.nextRecoverPct || 0).toFixed(1)}%)`;
+    } else {
+      leftHtml = '周回血追踪中';
+    }
+    const rightTxt = obs.recovered24hPct >= 0.1
+      ? `24h已回 +${Number(obs.recovered24hPct).toFixed(1)}% · ${sm.text}`
+      : sm.text;
+    const tip = `${rec.sourceLabel || ''}：${rec.note || ''}`;
+    return `<div class="rec-sub num" title="${esc(tip)}">
+      <span>${leftHtml}</span>
+      <span class="dim">${esc(rightTxt)}</span>
+    </div>`;
+  }
+
+  function renderPoolWeeklyRecoveryDetail(rec, accent) {
+    if (!rec || rec.source === 'full' || Number(rec.usedPct || 0) <= 0.05) return '';
+    const sm = weeklyRecSourceMeta(rec);
+    const obs = rec.observedRecovery || {};
+    const buckets = rec.buckets || [];
+    const maxPct = Math.max(0.1, ...buckets.map((b) => Number(b.recoverPct) || 0));
+    const fillCls = rec.source === 'snapshot' ? '' : (accent || '');
+
+    const obsBanner = (obs.isActive || Number(obs.recovered24hPct || 0) >= 0.1)
+      ? `<div class="callout info" style="margin-top:6px;padding:5px 8px">
+          ${obs.isActive ? '<strong style="color:var(--ok)">正在回血</strong> · ' : ''}近 24h 实测已回血 <strong class="num">+${Number(obs.recovered24hPct || 0).toFixed(1)}%</strong>${obs.ratePctPerHour > 0 ? ` · 速率 <strong class="num">+${obs.ratePctPerHour}%/h</strong>` : ''}${obs.etaFullSec > 0 ? ` · 按速率回满约 <span class="num">${fmtDuration(obs.etaFullSec)}</span>` : ''}
+        </div>`
+      : '';
+
+    const rowsHtml = buckets.map((b) => {
+      const pctW = Math.max(6, Math.round((Number(b.recoverPct || 0) / maxPct) * 100));
+      const srcTxt = b.source === 'snapshot' ? '官方快照实测' : (b.source === 'local_estimate' ? '本机7d消耗估算' : (b.source === 'hybrid' ? '实测+估算混合' : '官方参考时间'));
+      const tip = `${b.dateKey} (${fmtHM(b.firstFreeTs)}–${fmtHM(b.lastFreeTs)})：预计释放 +${Number(b.recoverPct || 0).toFixed(2)}%，累计恢复 +${Number(b.cumRecoverPct || 0).toFixed(1)}%（预计余 ${Number(b.projectedRemainingPct || 0).toFixed(1)}%）· ${srcTxt}${b.turns > 0 ? ` · 对应 ${b.turns} 轮` : ''}`;
+      return `<div class="rec-row num" title="${esc(tip)}">
+        <span class="roll-time">${esc(b.label)}</span>
+        <div class="roll-bar"><div class="roll-fill ${esc(fillCls)}" style="width:${pctW}%"></div></div>
+        <span class="roll-val"><strong>+${Number(b.recoverPct || 0).toFixed(1)}%</strong> <span class="dim">→ ${Number(b.projectedRemainingPct || 0).toFixed(0)}%</span></span>
+      </div>`;
+    }).join('');
+
+    return `<div class="rec-panel">
+      <div class="meta-row" style="margin-bottom:5px">
+        <span style="color:var(--fg);font-weight:600;display:inline-flex;align-items:center;gap:5px">
+          <span>7 天滚动回血预测</span>
+          <span class="pill ${sm.pill}" style="font-size:10px;padding:1px 5px">${esc(sm.text)}</span>
+        </span>
+        <span class="num dim">${obs.sampleCount > 1 ? `已录 ${obs.historySpanHours}h 快照` : '后台快照已启动'}</span>
+      </div>
+      ${obsBanner}
+      <div class="roll-head" style="margin-top:6px;margin-bottom:5px">
+        <div class="roll-kpi">
+          <div class="roll-kpi-lbl">下批周回血</div>
+          <div class="roll-kpi-val num" style="color:var(--ok)">${rec.nextRecoverTs > 0 ? cdSpan(rec.nextRecoverTs, '即将释放') : '--'}</div>
+          <div class="roll-kpi-sub num">${rec.nextRecoverTs > 0 ? `${fmtDateTime(rec.nextRecoverTs)} · 当日 +${Number(rec.nextRecoverPct || 0).toFixed(1)}%` : '等待数据'}</div>
+        </div>
+        <div class="roll-kpi">
+          <div class="roll-kpi-lbl">未来 24h / 48h 预计</div>
+          <div class="roll-kpi-val num">+${Number(rec.recoverNext24hPct || 0).toFixed(1)}%</div>
+          <div class="roll-kpi-sub num">48h +${Number(rec.recoverNext48hPct || 0).toFixed(1)}% · 72h +${Number(rec.recoverNext72hPct || 0).toFixed(1)}%</div>
+        </div>
+      </div>
+      ${buckets.length ? `<div class="roll-list">${rowsHtml}</div>` : ''}
+      ${rec.note ? `<div class="sub" style="margin-top:6px;line-height:1.4">${esc(rec.note)}</div>` : ''}
+    </div>`;
   }
 
   function gridCells(segs, limit) {
@@ -741,7 +854,8 @@
     }
     if (w.resetTs > 0) {
       if (compact) return cdSpan(w.resetTs);
-      return `重置 ${fmtDateTime(w.resetTs)} (${cdSpan(w.resetTs)})`;
+      const lbl = w.window === 'weekly' ? '参考锚点' : '重置';
+      return `${lbl} ${fmtDateTime(w.resetTs)} (${cdSpan(w.resetTs)})`;
     }
     return `<span class="dim">${compact ? '未计窗' : '尚无重置计时'}</span>`;
   }
@@ -812,7 +926,7 @@
     const w5 = d.imageQuota && !d.imageQuota.error ? d.imageQuota.window_5h : null;
     if (w5) {
       tabDot.style.display = '';
-      const cls = healthCls(w5.health);
+      const cls = w5.weekly_cooldown_active ? 'bad' : healthCls(w5.health);
       tabDot.style.background = cls === 'bad' ? 'var(--bad)' : cls === 'warn' ? 'var(--warn)' : 'var(--ok)';
     } else {
       tabDot.style.display = 'none';
@@ -835,6 +949,8 @@
       const avg = iq.per_image_avg || {};
       const wrAvg = avg.with_refs || {};
       const rs = iq.rolling_schedule || {};
+      const wrs = iq.weekly_rolling_schedule || {};
+      const w7 = iq.window_7d || {};
       const meta = imgStatusMeta(w5, anc);
       const refCalls = anc.ref_calls || w5.hard_cap || 60;
       const refTokens = anc.ref_tokens || 0;
@@ -853,7 +969,12 @@
       const m30 = rs.recover_next_30m || { calls: 0, tokens_total: 0, est_imgs_with_refs: 0 };
 
       let mainVal = '';
-      if (w5.cooldown_active) {
+      if (w5.weekly_cooldown_active) {
+        mainVal = `<div class="bigrow">
+          <div class="big bad num">周冷却 ${cdSpan(w5.weekly_reset_ts || wrs.active_reset_ts, '已解封')}</div>
+          <span class="sub num">解封 ${fmtDateTime(w5.weekly_reset_ts || wrs.active_reset_ts)}</span>
+        </div>`;
+      } else if (w5.cooldown_active) {
         mainVal = `<div class="bigrow">
           <div class="big bad num">冷却 ${cdSpan(w5.next_recover_ts || w5.window_end, '已解封')}</div>
           <span class="sub num">解封 ${fmtClock(w5.next_recover_ts || w5.window_end)}</span>
@@ -905,8 +1026,10 @@
           ${!w5.cooldown_active && byRefRem['2'] !== undefined ? `<span class="chip num" title="按 2 张参考图实测均图 Token 换算">2参余 <strong>~${byRefRem['2']}张</strong></span>` : ''}
           ${m30.calls > 0 ? `<span class="chip num" title="未来 30 分钟滚轴将释放 ${m30.calls} 次 / ${fmtTok(m30.tokens_total)} tok">30分回血 <strong>+${m30.est_imgs_with_refs || m30.calls}张</strong></span>` : ''}
           <span class="chip num">窗内 <strong>${w5.ok}成/${w5.eof}EOF</strong>${w5.est_usd > 0 ? ` · ${fmtUsd(w5.est_usd)}` : ''}</span>
+          ${(w7.attempts || 0) > 0 ? `<span class="chip num" title="近 7 天累计生图 ${w7.attempts} 次（${fmtTok(w7.tokens_total)} tok）；最早一批将于 ${esc(fmtDateTime(wrs.next_recover_ts))} 滚出回血">7天 <strong>${w7.attempts}次</strong>${wrs.next_recover_ts > 0 ? ` · ${fmtMD(wrs.next_recover_ts)}起回血` : ''}</span>` : ''}
           ${ledgers.length ? `<span class="chip">账本 <strong>${ledgers.length}集</strong></span>` : ''}
         </div>
+        ${w5.weekly_cooldown_active ? `<div class="callout bad" style="margin-top:6px">命中官方周池 429 冷却，预计解封 ${fmtDateTime(w5.weekly_reset_ts)}（${cdSpan(w5.weekly_reset_ts, '已解封')}）。</div>` : ''}
         ${w5.eof_warning ? `<div class="callout warn" style="margin-top:6px">近 5h EOF 率 ${w5.eof_rate_pct}%（${w5.eof} 次），断连重试可能放大隐性配额消耗。</div>` : ''}
       </section>`);
     }
@@ -943,6 +1066,7 @@
             <div class="bar-wrap sm">
               <div class="bar-fill" style="width:${Math.max(0, Math.min(100, wpct))}%;background:${barFillColor(w.health, p.accent)}"></div>
             </div>
+            ${w.window === 'weekly' ? renderPoolWeeklyRecoveryOverview(p.weeklyRecovery) : ''}
           </div>`;
         }).join('');
         return `<div class="pool-mini ${activeCls}">
@@ -1112,7 +1236,7 @@
     const m2h = rs.recover_next_2h || { calls: 0, tokens_total: 0, est_imgs_with_refs: 0 };
     parts.push(`<section class="card">
       <div class="ch">
-        <span class="ctitle">时间滚轴 · 分段回血时间表</span>
+        <span class="ctitle">5h 时间滚轴 · 分段回血时间表</span>
         <span class="sub num">${buckets.length ? `共 ${rs.total_calls} 次待滚出` : '无排队释放'}</span>
       </div>
       ${buckets.length ? `
@@ -1144,6 +1268,57 @@
           </div>`;
         }).join('')}</div>
       ` : `<div class="sub">当前 5 小时滚动窗口已完全清空，暂无待释出调用。每次生图都会在发起满 5 小时后自动滚出释放。</div>`}
+    </section>`);
+
+    // 2b. 7-day weekly rolling schedule (day-aligned) & weekly 429 tracking
+    const wrs = iq.weekly_rolling_schedule || {};
+    const wBuckets = wrs.buckets || [];
+    const maxWBucketCalls = Math.max(1, ...wBuckets.map((b) => Number(b.calls) || 0));
+    const wfb = wrs.first_batch;
+    const wm24 = wrs.recover_next_24h || { calls: 0, tokens_total: 0, est_imgs_with_refs: 0 };
+    const wm48 = wrs.recover_next_48h || { calls: 0, tokens_total: 0, est_imgs_with_refs: 0 };
+    const wm72 = wrs.recover_next_72h || { calls: 0, tokens_total: 0, est_imgs_with_refs: 0 };
+    const peak7d = cal.observed_7d_safe_peak || {};
+    parts.push(`<section class="card">
+      <div class="ch">
+        <span class="ctitle">7 天周滚轴 · 按日回血时间表 ${wrs.cooldown_active ? '<span class="pill bad">周池冷却</span>' : ''}</span>
+        <span class="sub num">${wBuckets.length ? `近7天 ${wrs.total_calls} 次 (${fmtTok(wrs.total_tokens_total)})` : '7天无占用'}</span>
+      </div>
+      ${wBuckets.length ? `
+        <div class="roll-head">
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">${wrs.cooldown_active ? '预计周解封 / 下批回血' : '下批周滚出倒计时'}</div>
+            <div class="roll-kpi-val num" style="color:${wrs.cooldown_active ? 'var(--bad)' : 'var(--ok)'}">${cdSpan(wrs.next_recover_ts, '即将释放')}</div>
+            <div class="roll-kpi-sub num">${fmtDateTime(wrs.next_recover_ts)}${wfb ? ` · 先释 +${wfb.calls}次 (${fmtTok(wfb.tokens_total)})` : ''}</div>
+          </div>
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">7 天完全清空</div>
+            <div class="roll-kpi-val num">${cdSpan(wrs.full_clear_ts, '已清空')}</div>
+            <div class="roll-kpi-sub num">${fmtDateTime(wrs.full_clear_ts)} 全量滚出</div>
+          </div>
+        </div>
+        <div class="chips" style="margin-top:0">
+          <span class="chip num" title="未来 24 小时滚出 ${wm24.calls} 次 / ${fmtTok(wm24.tokens_total)} tok">24h内 <strong>+${wm24.calls}次</strong></span>
+          <span class="chip num" title="未来 48 小时滚出 ${wm48.calls} 次 / ${fmtTok(wm48.tokens_total)} tok">48h内 <strong>+${wm48.calls}次</strong></span>
+          <span class="chip num" title="未来 72 小时滚出 ${wm72.calls} 次 / ${fmtTok(wm72.tokens_total)} tok">72h内 <strong>+${wm72.calls}次</strong></span>
+          ${peak7d.max_attempts > 0 ? `<span class="chip num" title="近 30 天内实测无周池 429 的最高 7 天滚动峰">30d安全周峰 <strong>${peak7d.max_attempts}次</strong></span>` : ''}
+          ${cal.weekly_lock_count > 0 ? `<span class="chip num" style="border-color:color-mix(in srgb,var(--bad) 45%,transparent)">周429均值 <strong>${cal.avg_attempts_at_weekly_lock}次</strong></span>` : ''}
+        </div>
+        <div class="roll-list">${wBuckets.map((b) => {
+          const pctW = Math.max(6, Math.round((b.calls / maxWBucketCalls) * 100));
+          const wrPart = b.est_imgs_with_refs > 0 ? `（约合 +${b.est_imgs_with_refs} 张带垫图）` : '';
+          const tip = `${b.date_key} (${fmtHM(b.first_free_ts)}–${fmtHM(b.last_free_ts)})：滚出释放 ${b.calls} 次（${b.ok}成/${b.eof}EOF/${b.err}错），约 ${fmtTok(b.tokens_total)} tok${wrPart}，累计已释放 ${b.cum_calls}/${wrs.total_calls} (${b.cum_pct}%)`;
+          return `<div class="rec-row num" title="${esc(tip)}">
+            <span class="roll-time">${esc(b.label)}</span>
+            <div class="roll-bar"><div class="roll-fill pool-a" style="width:${pctW}%"></div></div>
+            <span class="roll-val"><strong>+${b.calls}次</strong> · ${fmtTok(b.tokens_total)} <span class="dim">(${b.cum_pct}%)</span></span>
+          </div>`;
+        }).join('')}</div>
+      ` : `<div class="sub">近 7 天暂无生图调用记录，每次生图都会在发起满 7 天后从周池自动滚出释放。</div>`}
+      ${wrs.last_weekly_429_msg ? `<div class="callout ${wrs.cooldown_active ? 'bad' : 'warn'}" style="margin-top:7px">
+        <div style="font-weight:600;margin-bottom:2px">最近官方周池 429 记录（${fmtDateTime(wrs.last_weekly_429_at)}）</div>
+        <div class="mono" style="font-size:11px;word-break:break-all">${esc(wrs.last_weekly_429_msg)}</div>
+      </div>` : ''}
     </section>`);
 
     // 3. Self-learning watermark band & per-image token profile
@@ -1218,12 +1393,13 @@
       <table class="stat-table num">
         <thead><tr><th>周期</th><th>成功</th><th>EOF</th><th>429</th><th>参考图</th><th>估算Tok</th><th>尝试</th></tr></thead>
         <tbody>${rows.map(([lbl, b]) => {
-          const tip = `失败 ${b.err ?? 0} · RPM限流 ${b.rpm_limited ?? 0} · 参数错 ${b.client_err ?? 0} · EOF率 ${b.eof_rate_pct ?? 0}% · 不含思考 ${fmtTok(b.tokens_raw)} · API等效 ${fmtUsd(b.est_usd)}`;
+          const cnt429 = (b.rate_limited || 0) + (b.weekly_rate_limited || 0);
+          const tip = `失败 ${b.err ?? 0} · 5h-429 ${b.rate_limited ?? 0} · 周429 ${b.weekly_rate_limited ?? 0} · RPM限流 ${b.rpm_limited ?? 0} · 参数错 ${b.client_err ?? 0} · EOF率 ${b.eof_rate_pct ?? 0}% · 不含思考 ${fmtTok(b.tokens_raw)} · API等效 ${fmtUsd(b.est_usd)}`;
           return `<tr title="${esc(tip)}">
             <td>${lbl}</td>
             <td style="color:var(--ok)">${b.ok ?? 0}</td>
             <td style="color:${(b.eof || 0) > 0 ? 'var(--warn)' : 'var(--dim)'}">${b.eof ?? 0}</td>
-            <td style="color:${(b.rate_limited || 0) > 0 ? 'var(--bad)' : 'var(--dim)'}">${b.rate_limited ?? 0}</td>
+            <td style="color:${cnt429 > 0 ? 'var(--bad)' : 'var(--dim)'}">${cnt429}</td>
             <td>${b.ref_images ?? 0}</td>
             <td>${fmtTok(b.tokens_total)}</td>
             <td><strong>${b.attempts ?? 0}</strong></td>
@@ -1362,9 +1538,10 @@
               <div class="bar-fill" style="width:${Math.max(0, Math.min(100, wpct))}%;background:${barFillColor(w.health, p.accent)}"></div>
             </div>
             <div class="meta-row">
-              <span>${w.window === '5h' ? '5 小时平滑峰值窗口' : w.window === 'weekly' ? '7 天个人套餐总额度' : '周期额度'}</span>
+              <span>${w.window === '5h' ? '5 小时平滑峰值窗口' : w.window === 'weekly' ? '7 天滚动回血池' : '周期额度'}</span>
               <span>${winResetHtml(w, false)}</span>
             </div>
+            ${w.window === 'weekly' ? renderPoolWeeklyRecoveryDetail(p.weeklyRecovery, p.accent) : ''}
           </div>`;
         }).join('');
         parts.push(`<section class="card ${activeCls}">
@@ -1532,8 +1709,11 @@
       (po.pools || []).map((p) => [
         p.key, p.remainingPct, p.bottleneckWindow,
         (p.windows || []).map((w) => [w.window, w.remainingPct, w.resetTs, w.isFull]),
+        p.weeklyRecovery?.source, p.weeklyRecovery?.recoverNext24hPct, p.weeklyRecovery?.buckets?.length,
+        p.weeklyRecovery?.observedRecovery?.sampleCount, p.weeklyRecovery?.observedRecovery?.recovered24hPct,
       ]),
       iq.error, w5.mode, w5.health, w5.metric_used, w5.ok, w5.eof, w5.err, w5.rate_limited,
+      w5.weekly_cooldown_active, w5.weekly_reset_ts,
       w5.tokens_total, w5.next_recover_ts, w5.full_clear_ts,
       w5.window_end, w5.soft_cap, w5.hard_cap, w5.token_cap, w5.anchor_mode, w5.last_429_at,
       iq.anchor?.status, iq.anchor?.source, iq.anchor?.ref_calls, iq.anchor?.ref_tokens,
@@ -1541,6 +1721,7 @@
       iq.anchor?.remaining_tokens, iq.anchor?.est_remaining_imgs_with_refs,
       iq.per_image_avg?.with_refs?.avg_tokens_total,
       iq.rolling_schedule?.buckets?.length,
+      iq.weekly_rolling_schedule?.total_calls, iq.weekly_rolling_schedule?.cooldown_active, iq.weekly_rolling_schedule?.buckets?.length,
       iq.window_24h?.attempts, iq.window_7d?.attempts,
       (iq.workspace_ledgers || []).map((l) => [l.path, l.updated_at]),
       iq.recent_events?.[0]?.ts,

@@ -28,10 +28,11 @@ WINDOW_5H_SEC = 5 * 3600
 WINDOW_24H_SEC = 24 * 3600
 WINDOW_7D_SEC = 7 * 86400
 WINDOW_30D_SEC = 30 * 86400
+WEEKLY_LOCK_THRESHOLD_SEC = 6 * 3600
 
 DEFAULT_SOFT_CAP = 54   # Default conservative soft warning cap (5h window)
 DEFAULT_HARD_CAP = 60   # Default conservative baseline cap (5h window)
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 REQUIRED_CACHED_EVENT_FIELDS = (
     "ts",
     "end_ts",
@@ -222,6 +223,13 @@ def classify_error(status: int, err_text: str, end_ts: float = 0.0) -> tuple[str
         )
         if is_rpm:
             return ("429_RPM", model, reset_ts, reset_iso, retry_sec, summary or "429 突发速率限流 (RPM)")
+        is_weekly_lock = (
+            reset_ts > 0.0
+            and end_ts > 0.0
+            and (reset_ts - end_ts) > WEEKLY_LOCK_THRESHOLD_SEC
+        )
+        if is_weekly_lock:
+            return ("429_WEEKLY", model, reset_ts, reset_iso, retry_sec, summary or "429 周配额已耗尽")
         return ("429", model, reset_ts, reset_iso, retry_sec, summary or "429 配额已耗尽")
 
     is_eof = (
@@ -500,6 +508,7 @@ def summarize_bucket(events: list[dict[str, Any]]) -> dict[str, Any]:
     eof = sum(1 for e in events if e["kind"] == "EOF")
     err = sum(1 for e in events if e["kind"] == "ERR")
     rate_limited = sum(1 for e in events if e["kind"] == "429")
+    weekly_rate_limited = sum(1 for e in events if e["kind"] == "429_WEEKLY")
     rpm_limited = sum(1 for e in events if e["kind"] == "429_RPM")
     client_err = sum(1 for e in events if e["kind"] == "CLIENT_ERR")
     running = sum(1 for e in events if e["kind"] == "RUNNING")
@@ -521,6 +530,7 @@ def summarize_bucket(events: list[dict[str, Any]]) -> dict[str, Any]:
         "eof": eof,
         "err": err,
         "rate_limited": rate_limited,
+        "weekly_rate_limited": weekly_rate_limited,
         "rpm_limited": rpm_limited,
         "client_err": client_err,
         "running": running,
@@ -830,14 +840,173 @@ def build_rolling_schedule(
     }
 
 
+def build_weekly_rolling_schedule(
+    events_7d: list[dict[str, Any]],
+    now_ts: float,
+    mode: str = "attempts",
+    active_weekly_reset_ts: float = 0.0,
+    avg_with_refs_tokens: float = 0.0,
+    last_weekly_429_at: float = 0.0,
+    last_weekly_429_msg: str = "",
+) -> dict[str, Any]:
+    """Build local-day aligned 7-day rolling roll-off recovery schedule for image generation."""
+    if mode == "ok_only":
+        tracked = [e for e in events_7d if e["kind"] == "OK"]
+    else:
+        tracked = [e for e in events_7d if e["kind"] in BILLABLE_KINDS]
+
+    def _to_wr_imgs(tok: int) -> float:
+        if avg_with_refs_tokens <= 0 or tok <= 0:
+            return 0.0
+        return round(tok / avg_with_refs_tokens, 1)
+
+    cooldown_active = active_weekly_reset_ts > now_ts
+    items: list[tuple[float, dict[str, Any]]] = []
+    for e in tracked:
+        free_ts = float(e["ts"]) + WINDOW_7D_SEC
+        if free_ts <= now_ts:
+            if cooldown_active:
+                free_ts = active_weekly_reset_ts
+            else:
+                continue
+        items.append((free_ts, e))
+
+    items.sort(key=lambda pair: (pair[0], pair[1].get("step_idx", 0)))
+
+    empty_milestone = {"calls": 0, "tokens_raw": 0, "tokens_total": 0, "est_imgs_with_refs": 0.0}
+    if not items:
+        return {
+            "bucket_granularity": "day",
+            "cooldown_active": cooldown_active,
+            "active_reset_ts": round(active_weekly_reset_ts, 3) if cooldown_active else 0.0,
+            "last_weekly_429_at": round(last_weekly_429_at, 3) if last_weekly_429_at else 0.0,
+            "last_weekly_429_msg": last_weekly_429_msg,
+            "total_calls": 0,
+            "total_tokens_raw": 0,
+            "total_tokens_total": 0,
+            "total_est_imgs_with_refs": 0.0,
+            "oldest_ts": 0.0,
+            "newest_ts": 0.0,
+            "next_recover_ts": round(active_weekly_reset_ts, 3) if cooldown_active else 0.0,
+            "next_recover_sec": round(max(0.0, active_weekly_reset_ts - now_ts), 1) if cooldown_active else 0.0,
+            "full_clear_ts": round(active_weekly_reset_ts, 3) if cooldown_active else 0.0,
+            "full_clear_sec": round(max(0.0, active_weekly_reset_ts - now_ts), 1) if cooldown_active else 0.0,
+            "first_batch": None,
+            "recover_next_24h": dict(empty_milestone),
+            "recover_next_48h": dict(empty_milestone),
+            "recover_next_72h": dict(empty_milestone),
+            "buckets": [],
+        }
+
+    total_calls = len(items)
+    total_raw = sum(int(e.get("tokens_raw") or 0) for _, e in items)
+    total_tok = sum(int(e.get("tokens_total") or 0) for _, e in items)
+    oldest_ts = min(float(e["ts"]) for _, e in items)
+    newest_ts = max(float(e["ts"]) for _, e in items)
+
+    first_free_ts = items[0][0]
+    last_free_ts = items[-1][0]
+    next_recover_ts = max(first_free_ts, active_weekly_reset_ts) if cooldown_active else first_free_ts
+    full_clear_ts = max(last_free_ts, active_weekly_reset_ts) if cooldown_active else last_free_ts
+
+    # First batch: all events expiring within 1 hour of the earliest 7-day roll-off
+    fb_items = [(ft, e) for ft, e in items if ft <= first_free_ts + 3600.0]
+    fb_tok = sum(int(e.get("tokens_total") or 0) for _, e in fb_items)
+    first_batch = {
+        "free_ts": round(next_recover_ts, 3),
+        "remaining_sec": round(max(0.0, next_recover_ts - now_ts), 1),
+        "calls": len(fb_items),
+        "tokens_raw": sum(int(e.get("tokens_raw") or 0) for _, e in fb_items),
+        "tokens_total": fb_tok,
+        "est_imgs_with_refs": _to_wr_imgs(fb_tok),
+    }
+
+    def milestone(horizon_sec: float) -> dict[str, Any]:
+        cut = now_ts + horizon_sec
+        sub = [e for ft, e in items if ft <= cut]
+        sub_tok = sum(int(e.get("tokens_total") or 0) for e in sub)
+        return {
+            "calls": len(sub),
+            "tokens_raw": sum(int(e.get("tokens_raw") or 0) for e in sub),
+            "tokens_total": sub_tok,
+            "est_imgs_with_refs": _to_wr_imgs(sub_tok),
+        }
+
+    day_map: dict[datetime.date, list[tuple[float, dict[str, Any]]]] = {}
+    for ft, e in items:
+        day_key = datetime.datetime.fromtimestamp(ft).date()
+        day_map.setdefault(day_key, []).append((ft, e))
+
+    buckets: list[dict[str, Any]] = []
+    cum_calls = 0
+    cum_tok = 0
+    for day_key in sorted(day_map.keys()):
+        b_items = day_map[day_key]
+        b_calls = len(b_items)
+        b_ok = sum(1 for _, e in b_items if e["kind"] == "OK")
+        b_eof = sum(1 for _, e in b_items if e["kind"] == "EOF")
+        b_err = sum(1 for _, e in b_items if e["kind"] == "ERR")
+        b_run = sum(1 for _, e in b_items if e["kind"] == "RUNNING")
+        b_raw = sum(int(e.get("tokens_raw") or 0) for _, e in b_items)
+        b_tok = sum(int(e.get("tokens_total") or 0) for _, e in b_items)
+        cum_calls += b_calls
+        cum_tok += b_tok
+        day_start = datetime.datetime(day_key.year, day_key.month, day_key.day).timestamp()
+        next_day = day_key + datetime.timedelta(days=1)
+        day_end = datetime.datetime(next_day.year, next_day.month, next_day.day).timestamp()
+        buckets.append({
+            "date_key": day_key.isoformat(),
+            "label": day_key.strftime("%m-%d"),
+            "bucket_start_ts": round(day_start, 3),
+            "bucket_end_ts": round(day_end, 3),
+            "first_free_ts": round(b_items[0][0], 3),
+            "last_free_ts": round(b_items[-1][0], 3),
+            "calls": b_calls,
+            "ok": b_ok,
+            "eof": b_eof,
+            "err": b_err,
+            "running": b_run,
+            "tokens_raw": b_raw,
+            "tokens_total": b_tok,
+            "est_imgs_with_refs": _to_wr_imgs(b_tok),
+            "cum_calls": cum_calls,
+            "cum_tokens_total": cum_tok,
+            "cum_pct": round(cum_calls / total_calls * 100.0, 1) if total_calls > 0 else 0.0,
+        })
+
+    return {
+        "bucket_granularity": "day",
+        "cooldown_active": cooldown_active,
+        "active_reset_ts": round(active_weekly_reset_ts, 3) if cooldown_active else 0.0,
+        "last_weekly_429_at": round(last_weekly_429_at, 3) if last_weekly_429_at else 0.0,
+        "last_weekly_429_msg": last_weekly_429_msg,
+        "total_calls": total_calls,
+        "total_tokens_raw": total_raw,
+        "total_tokens_total": total_tok,
+        "total_est_imgs_with_refs": _to_wr_imgs(total_tok),
+        "oldest_ts": round(oldest_ts, 3),
+        "newest_ts": round(newest_ts, 3),
+        "next_recover_ts": round(next_recover_ts, 3),
+        "next_recover_sec": round(max(0.0, next_recover_ts - now_ts), 1),
+        "full_clear_ts": round(full_clear_ts, 3),
+        "full_clear_sec": round(max(0.0, full_clear_ts - now_ts), 1),
+        "first_batch": first_batch,
+        "recover_next_24h": milestone(86400.0),
+        "recover_next_48h": milestone(2 * 86400.0),
+        "recover_next_72h": milestone(3 * 86400.0),
+        "buckets": buckets,
+    }
+
+
 def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0.0) -> dict[str, Any]:
-    """Compute empirical 5h 429 ceiling observations and 30d proven-safe sliding 5h peak."""
+    """Compute empirical 5h/7d 429 ceiling observations and 30d proven-safe sliding peaks."""
     # Group distinct 5h 429 windows by reset_ts bucket (rounded to nearest 60s)
     windows_by_reset: dict[int, dict[str, float]] = {}
+    weekly_windows_by_reset: dict[int, dict[str, float]] = {}
     detected_model = ""
     rpm_burst_count = 0
     for e in events:
-        if e.get("model") and e["kind"] in ("429", "429_RPM"):
+        if e.get("model") and e["kind"] in ("429", "429_RPM", "429_WEEKLY"):
             detected_model = e["model"]
         if e["kind"] == "429_RPM":
             rpm_burst_count += 1
@@ -849,6 +1018,17 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
                 cur = windows_by_reset.get(bucket)
                 if cur is None:
                     windows_by_reset[bucket] = {"reset_ts": rt, "trigger_ts": trig}
+                else:
+                    cur["reset_ts"] = max(cur["reset_ts"], rt)
+                    cur["trigger_ts"] = min(cur["trigger_ts"], trig)
+        elif e["kind"] == "429_WEEKLY":
+            rt = float(e.get("reset_ts") or 0.0)
+            if rt > 0:
+                bucket = int(round(rt / 600.0)) * 600
+                trig = float(e.get("end_ts") or e["ts"])
+                cur = weekly_windows_by_reset.get(bucket)
+                if cur is None:
+                    weekly_windows_by_reset[bucket] = {"reset_ts": rt, "trigger_ts": trig}
                 else:
                     cur["reset_ts"] = max(cur["reset_ts"], rt)
                     cur["trigger_ts"] = min(cur["trigger_ts"], trig)
@@ -979,7 +1159,61 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
             if active_floor_ts <= 0.0 or t_end < active_floor_ts:
                 _update_peak(prior_peak, t_end, cur_attempts, cur_ok, cur_tok_raw, cur_tok_total, cur_refs)
 
+    # Weekly 429 observations (7-day rolling window ending at trigger_ts)
+    weekly_observations: list[dict[str, Any]] = []
+    for _, info in sorted(weekly_windows_by_reset.items()):
+        reset_ts = info["reset_ts"]
+        trigger_ts = info["trigger_ts"]
+        w_start = trigger_ts - WINDOW_7D_SEC
+        in_win = [e for e in events if w_start <= e["ts"] <= trigger_ts]
+        stats = summarize_bucket(in_win)
+        weekly_observations.append({
+            "window_start": round(w_start, 3),
+            "window_end": round(reset_ts, 3),
+            "trigger_ts": round(trigger_ts, 3),
+            "ok": stats["ok"],
+            "eof": stats["eof"],
+            "err": stats["err"],
+            "attempts": stats["attempts"],
+            "eof_rate_pct": stats["eof_rate_pct"],
+            "ref_images": stats["ref_images"],
+            "tokens_raw": stats["tokens_raw"],
+            "tokens_total": stats["tokens_total"],
+            "est_usd": stats["est_usd"],
+        })
+
+    weekly_lock_times = sorted(float(e.get("end_ts") or e["ts"]) for e in events if e["kind"] == "429_WEEKLY")
+    peak_7d = _empty_peak()
+    if billable:
+        left7 = 0
+        wlock_idx = 0
+        cur_ok7 = 0
+        cur_raw7 = 0
+        cur_tok7 = 0
+        cur_refs7 = 0
+        for right7, ev in enumerate(billable):
+            t_end = float(ev["ts"])
+            if ev["kind"] == "OK":
+                cur_ok7 += 1
+            cur_raw7 += int(ev.get("tokens_raw") or 0)
+            cur_tok7 += int(ev.get("tokens_total") or 0)
+            cur_refs7 += int(ev.get("n_refs") or 0)
+            while left7 <= right7 and float(billable[left7]["ts"]) < t_end - WINDOW_7D_SEC:
+                old = billable[left7]
+                if old["kind"] == "OK":
+                    cur_ok7 -= 1
+                cur_raw7 -= int(old.get("tokens_raw") or 0)
+                cur_tok7 -= int(old.get("tokens_total") or 0)
+                cur_refs7 -= int(old.get("n_refs") or 0)
+                left7 += 1
+            while wlock_idx < len(weekly_lock_times) and weekly_lock_times[wlock_idx] < t_end - WINDOW_7D_SEC:
+                wlock_idx += 1
+            if wlock_idx < len(weekly_lock_times) and weekly_lock_times[wlock_idx] <= t_end + 3600.0:
+                continue
+            _update_peak(peak_7d, t_end, right7 - left7 + 1, cur_ok7, cur_raw7, cur_tok7, cur_refs7)
+
     latest = observations[-1] if observations else None
+    latest_weekly = weekly_observations[-1] if weekly_observations else None
     return {
         "detected_model": detected_model or "gemini-3.1-flash-image",
         "observed_lock_count": len(observations),
@@ -996,6 +1230,12 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
         "clean_avg_tokens_at_lock": int(round(sum(o["tokens_total"] for o in clean_locks) / len(clean_locks))) if clean_locks else None,
         "observed_safe_peak": peak,
         "prior_safe_peak": prior_peak,
+        "weekly_lock_count": len(weekly_observations),
+        "latest_weekly_lock": latest_weekly,
+        "weekly_lock_observations": weekly_observations[-4:],
+        "avg_attempts_at_weekly_lock": round(sum(o["attempts"] for o in weekly_observations) / len(weekly_observations), 1) if weekly_observations else None,
+        "avg_tokens_at_weekly_lock": int(round(sum(o["tokens_total"] for o in weekly_observations) / len(weekly_observations))) if weekly_observations else None,
+        "observed_7d_safe_peak": peak_7d,
     }
 
 
@@ -1229,7 +1469,7 @@ def compute_anchor(
             notes.append(f"历史上曾记录高 EOF 噪声锁（{lock_upper_calls} 次），未作为硬天花板")
     else:
         source = "default_baseline"
-        label = "默认保守基准（样本积累中）"
+        label = "默认基准（样本积累中）"
         ref_calls = max(1, int(hard_cap))
         soft_calls = max(1, min(ref_calls, int(soft_cap)))
         ref_tokens = int(round(ref_calls * avg_wr_tok))
@@ -1248,7 +1488,7 @@ def compute_anchor(
             health = "warning"
         else:
             health = "ok"
-        notes.append(f"近 30 天样本不足 10 次，暂按默认保守基准（{soft_calls}/{ref_calls} 次）展示")
+        notes.append("近 30 天样本不足 10 次，暂按默认基准（54/60 次）展示")
 
     if cooldown_active:
         used_pct = 100.0
@@ -1359,12 +1599,31 @@ def build_report(
                 latest_429_end_ts = et
                 latest_429_event = e
 
+    # Identify active or most recent official weekly (>6h) 429 reset timestamp
+    latest_weekly_429_event = None
+    active_weekly_reset_ts = 0.0
+    latest_weekly_429_end_ts = 0.0
+    for e in recent_7d:
+        if e["kind"] == "429_WEEKLY":
+            rt = float(e.get("reset_ts") or 0.0)
+            et = float(e.get("end_ts") or e["ts"])
+            if rt > active_weekly_reset_ts or (rt == active_weekly_reset_ts and et >= latest_weekly_429_end_ts):
+                active_weekly_reset_ts = rt
+                latest_weekly_429_end_ts = et
+                latest_weekly_429_event = e
+
     # If a later OK succeeded after the 429 lock, backend already rolled open capacity
     ok_after_lock = (
         latest_429_event is not None
         and any(e["kind"] == "OK" and float(e["ts"]) > latest_429_end_ts + 5.0 for e in recent_24h)
     )
     cooldown_active = (active_reset_ts > now_ts) and not ok_after_lock
+
+    ok_after_weekly_lock = (
+        latest_weekly_429_event is not None
+        and any(e["kind"] == "OK" and float(e["ts"]) > latest_weekly_429_end_ts + 5.0 for e in recent_7d)
+    )
+    weekly_cooldown_active = (active_weekly_reset_ts > now_ts) and not ok_after_weekly_lock
 
     if cooldown_active:
         window_mode = "official_429_lock"
@@ -1401,6 +1660,15 @@ def build_report(
         mode=mode,
         active_reset_ts=active_reset_ts if cooldown_active else 0.0,
         avg_with_refs_tokens=avg_wr_tok,
+    )
+    weekly_rolling_schedule = build_weekly_rolling_schedule(
+        recent_7d,
+        now_ts,
+        mode=mode,
+        active_weekly_reset_ts=active_weekly_reset_ts if weekly_cooldown_active else 0.0,
+        avg_with_refs_tokens=avg_wr_tok,
+        last_weekly_429_at=latest_weekly_429_event["ts"] if latest_weekly_429_event else 0.0,
+        last_weekly_429_msg=latest_weekly_429_event["error_summary"] if latest_weekly_429_event else "",
     )
     anchor = compute_anchor(
         anchor_mode=a_mode,
@@ -1467,8 +1735,13 @@ def build_report(
             "exceeded_safe_peak": anchor["exceeded_safe_peak"],
             "last_429_at": latest_429_event["ts"] if latest_429_event else 0.0,
             "last_429_msg": latest_429_event["error_summary"] if latest_429_event else "",
+            "weekly_cooldown_active": weekly_cooldown_active,
+            "weekly_reset_ts": round(active_weekly_reset_ts, 3) if weekly_cooldown_active else 0.0,
+            "last_weekly_429_at": latest_weekly_429_event["ts"] if latest_weekly_429_event else 0.0,
+            "last_weekly_429_msg": latest_weekly_429_event["error_summary"] if latest_weekly_429_event else "",
         },
         "rolling_schedule": rolling_schedule,
+        "weekly_rolling_schedule": weekly_rolling_schedule,
         "per_image_avg": per_image_avg,
         "anchor": anchor,
         "window_24h": w24,
