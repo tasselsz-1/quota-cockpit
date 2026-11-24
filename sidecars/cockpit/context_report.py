@@ -374,6 +374,160 @@ def detect_system_files(home: str, workspace: str | None, app_dir: str) -> list[
     return [(p, 0) for p in found]
 
 
+def step_timestamp(step: Step) -> int:
+    ts = 0
+    for fn in (7, 6, 1):  # completed_at, response_at, created_at
+        m = step.md.msg(fn)
+        if m is not None:
+            v = m.int(1)
+            if v > ts:
+                ts = v
+    return ts
+
+
+def _summarize_cache_turns(turns: list[dict]) -> dict:
+    if not turns:
+        return {
+            "turns": 0,
+            "cache_read_tokens": 0,
+            "uncached_input_tokens": 0,
+            "total_input_tokens": 0,
+            "output_tokens": 0,
+            "hit_rate_pct": 0.0,
+            "misses": 0,
+        }
+    c_read = sum(t["cache_read_tokens"] for t in turns)
+    uncached = sum(t["uncached_input_tokens"] for t in turns)
+    tot_in = c_read + uncached
+    out_tok = sum(t["output_tokens"] for t in turns)
+    misses = sum(1 for t in turns if t["is_miss"])
+    return {
+        "turns": len(turns),
+        "cache_read_tokens": c_read,
+        "uncached_input_tokens": uncached,
+        "total_input_tokens": tot_in,
+        "output_tokens": out_tok,
+        "hit_rate_pct": round((c_read / tot_in) * 100.0, 1) if tot_in > 0 else 0.0,
+        "misses": misses,
+    }
+
+
+def collect_cache_stats(steps: list[Step], gen: Msg | None, recent_limit: int = 16) -> dict:
+    """Extract exact per-turn and cumulative Prompt Cache hit telemetry from protobufs.
+
+    In Antigravity's model_usage message (step.md.msg(9) / gen.msg(1).msg(4)):
+      - field 2 = uncached input tokens (fresh input + cache write)
+      - field 3 = output tokens
+      - field 5 = cache read tokens (prompt cache hit)
+    """
+    turns: list[dict] = []
+    seg_start_idx = 0
+    after_compact = False
+    prev_total_input = 0
+
+    for pos, step in enumerate(steps):
+        if step.payload(STEP_CHECKPOINT) is not None and step.status == STATUS_DONE:
+            after_compact = True
+            seg_start_idx = len(turns)
+            prev_total_input = 0
+            continue
+
+        if step.type != 15:  # PLANNER_RESPONSE
+            continue
+
+        usage = step.md.msg(9)
+        if usage is None:
+            continue
+        uncached = max(0, usage.int(2))
+        cache_read = max(0, usage.int(5))
+        total_input = uncached + cache_read
+        if total_input <= 0:
+            continue
+
+        output_tok = max(0, usage.int(3))
+        hit_rate = round((cache_read / total_input) * 100.0, 1)
+        is_cold = (len(turns) == 0) or after_compact
+        prefix_retention: float | None = None
+        if not is_cold and prev_total_input > 0:
+            prefix_retention = round(min(100.0, (cache_read / prev_total_input) * 100.0), 1)
+
+        # True mid-segment cache miss: prior prefix existed in same segment, yet read dropped to 0 or <50% of prior prefix
+        is_miss = (
+            not is_cold
+            and prev_total_input > 0
+            and (cache_read == 0 or (hit_rate < 40.0 and cache_read < prev_total_input * 0.5))
+        )
+
+        if is_cold:
+            status = "cold"
+        elif is_miss:
+            status = "miss"
+        elif hit_rate >= 80.0:
+            status = "high"
+        elif hit_rate >= 40.0:
+            status = "mid"
+        else:
+            status = "low"
+
+        turns.append({
+            "step_pos": pos,
+            "ts": step_timestamp(step),
+            "cache_read_tokens": cache_read,
+            "uncached_input_tokens": uncached,
+            "total_input_tokens": total_input,
+            "output_tokens": output_tok,
+            "hit_rate_pct": hit_rate,
+            "prefix_retention_pct": prefix_retention,
+            "status": status,
+            "is_cold": is_cold,
+            "is_miss": is_miss,
+            "after_compact": after_compact,
+        })
+        after_compact = False
+        prev_total_input = total_input
+
+    # Fallback: synthesize single latest entry from gen_metadata if steps carried no usage
+    if not turns and gen is not None:
+        chat = gen.msg(1)
+        usage = chat.msg(4) if chat is not None else None
+        if usage is not None:
+            uncached = max(0, usage.int(2))
+            cache_read = max(0, usage.int(5))
+            total_input = uncached + cache_read
+            if total_input > 0:
+                hit_rate = round((cache_read / total_input) * 100.0, 1)
+                status = "high" if hit_rate >= 80.0 else ("mid" if hit_rate >= 40.0 else ("cold" if cache_read == 0 else "low"))
+                turns.append({
+                    "step_pos": -1,
+                    "ts": 0,
+                    "cache_read_tokens": cache_read,
+                    "uncached_input_tokens": uncached,
+                    "total_input_tokens": total_input,
+                    "output_tokens": max(0, usage.int(3)),
+                    "hit_rate_pct": hit_rate,
+                    "prefix_retention_pct": None,
+                    "status": status,
+                    "is_cold": cache_read == 0,
+                    "is_miss": False,
+                    "after_compact": False,
+                })
+
+    compacted_pending = after_compact and len(turns) > 0
+    seg_turns = turns[seg_start_idx:]
+    has_compaction = seg_start_idx > 0 or compacted_pending
+
+    return {
+        "has_data": len(turns) > 0,
+        "turns": len(turns),
+        "has_compaction": has_compaction,
+        "compacted_pending": compacted_pending,
+        "latest": turns[-1] if turns else None,
+        "segment": _summarize_cache_turns(seg_turns),
+        "session": _summarize_cache_turns(turns),
+        "recent": turns[-recent_limit:] if recent_limit > 0 else [],
+    }
+
+
 def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     st = {k: 0 for k in (
         "user", "agent", "tool", "checkpoint", "system_messages", "system_prompt", "system_tools",
@@ -512,6 +666,7 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     st["knowledge_files"] = knowledge
     st["artifact_files"] = artifacts
     st["skill_files"] = skill_files
+    st["cache"] = collect_cache_stats(steps, gen)
     return st
 
 
@@ -565,6 +720,15 @@ def render_stats(st: dict, model: str) -> str:
     out.append(f"□ Free space: {fmt_tok(free)} ({pct(free, limit):.1f}%)\n")
     if st["checkpoint"]:
         out.append(f"⊠ Checkpoint buffer: {fmt_tok(st['checkpoint'])} tokens (not counted in usage)\n")
+    cache = st.get("cache") or {}
+    if cache.get("has_data") and cache.get("latest"):
+        lat = cache["latest"]
+        ses = cache["session"]
+        out.append(
+            f"⚡ Prompt cache: latest {lat['hit_rate_pct']:.1f}% "
+            f"({fmt_tok(lat['cache_read_tokens'])} hit / {fmt_tok(lat['uncached_input_tokens'])} new) · "
+            f"session {ses['hit_rate_pct']:.1f}% ({ses['turns']} turns, {ses['misses']} miss)\n"
+        )
     return "".join(out)
 
 
@@ -817,6 +981,7 @@ def main():
             "artifact_files": [{"path": p, "tokens": t} for p, t in st["artifact_files"]],
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
+            "cache": st["cache"],
         }, indent=2))
         return
 

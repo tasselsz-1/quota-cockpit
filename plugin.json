@@ -1,8 +1,8 @@
 {
   "name": "quota-cockpit",
   "displayName": "配额与上下文",
-  "description": "侧边栏三合一实时监控台：生图配额（连续5h时间滚轴分段回血/官方Token与均图估算/30天自学习水位带/429官方解锁倒计时/可选工作区账本联动）、当前模型配额池（池A Gemini / 池B Claude 的 5h 与周额度双窗口实时余量）与当前会话精确上下文用量。零 Token 消耗。",
-  "version": "1.2.2",
+  "description": "侧边栏三合一实时监控台：生图配额（连续5h时间滚轴分段回血/官方Token与均图估算/30天自学习水位带/429官方解锁倒计时/可选工作区账本联动）、当前模型配额池（池A Gemini / 池B Claude 的 5h 与周额度双窗口实时余量）与当前会话精确上下文及 Prompt 缓存命中监控。零 Token 消耗。",
+  "version": "1.3.0",
   "author": {
     "name": "tasselsz-1",
     "url": "https://github.com/tasselsz-1"

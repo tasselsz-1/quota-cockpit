@@ -286,7 +286,7 @@ function fileStamp(path) {
   }
 }
 
-async function getContextReport(conversationId, workspaceUri) {
+async function getContextReport(conversationId, workspaceUri, force = false) {
   if (!UUID.test(conversationId || '')) {
     return { error: 'no-conversation' };
   }
@@ -297,7 +297,7 @@ async function getContextReport(conversationId, workspaceUri) {
   const workspace = workspacePath(workspaceUri);
   const key = [fileStamp(db), fileStamp(`${db}-wal`), workspace, fileStamp(CATALOG_PATH)].join('|');
   const cached = contextCache.get(conversationId);
-  if (cached && cached.key === key) return cached.report;
+  if (!force && cached && cached.key === key) return cached.report;
 
   const { cmd, pre } = await findPython();
   const args = [...pre, CONTEXT_SCRIPT, '--db', db, '--json'];
@@ -369,7 +369,7 @@ app.api('/api/dashboard', async (data) => {
 
   const pools = await refreshPools(force);
   const [context, imageQuota] = await Promise.all([
-    getContextReport(conversationId, workspace).catch((err) => ({ error: 'failed', message: err.message })),
+    getContextReport(conversationId, workspace, force).catch((err) => ({ error: 'failed', message: err.message })),
     getImageQuotaReport(workspace, force).catch((err) => ({ error: 'failed', message: err.message })),
   ]);
 

@@ -313,6 +313,47 @@
   .sum-left { display: flex; align-items: center; gap: 5px; min-width: 0; }
   .sum-left span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  /* prompt cache hit monitor */
+  .cache-strip {
+    margin-top: 7px; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+    background: color-mix(in srgb, var(--bg) 42%, transparent);
+  }
+  .cache-strip:hover { border-color: var(--dim); background: var(--card-hi); }
+  .cache-strip .meta-row { font-size: 11px; }
+  .cache-bar { height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 5px 0 4px; }
+  .cache-bar-fill { height: 100%; border-radius: 999px; transition: width .25s ease; }
+  .cache-spark {
+    display: flex; align-items: flex-end; gap: 3px; height: 34px;
+    padding: 4px 4px 3px; margin-top: 7px; border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+    background: color-mix(in srgb, var(--bg) 45%, transparent);
+  }
+  .cache-col {
+    flex: 1; min-width: 4px; height: 100%; display: flex; align-items: flex-end;
+    position: relative;
+  }
+  .cache-col.after-compact {
+    margin-left: 2px; padding-left: 3px;
+    border-left: 1px dashed color-mix(in srgb, var(--pool-a) 65%, transparent);
+  }
+  .cache-seg {
+    width: 100%; border-radius: 2px 2px 1px 1px; min-height: 3px;
+    transition: height .2s ease;
+  }
+  .cache-seg.high { background: var(--ok); }
+  .cache-seg.mid { background: var(--warn); }
+  .cache-seg.low { background: color-mix(in srgb, var(--warn) 78%, transparent); }
+  .cache-seg.miss { background: var(--bad); }
+  .cache-seg.cold { background: var(--pool-a); opacity: .82; }
+  .cache-legend {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    flex-wrap: wrap; margin-top: 5px; font-size: 10.5px; color: var(--dim);
+  }
+  .cache-legend-items { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .cache-dot { display: inline-block; width: 6px; height: 6px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+  .up-warn { color: var(--warn); }
+
   .link-btn {
     background: none; border: none; padding: 0; color: var(--pool-a); font-size: 11.5px; cursor: pointer;
   }
@@ -435,6 +476,33 @@
     return `<span class="num" data-cd-ts="${Math.round(ts)}" data-cd-zero="${esc(zeroText)}">${esc(fmtDuration(ts - nowSec(), zeroText))}</span>`;
   }
 
+  function fmtElapsed(sec) {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    if (s < 60) return `${s}秒前`;
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (d > 0) return `${d}天${h}时前`;
+    if (h > 0) return `${h}时${String(m).padStart(2, '0')}分前`;
+    return `${m}分${String(r).padStart(2, '0')}秒前`;
+  }
+
+  function elapsedTextWithHint(elapsedSec, hintCool) {
+    const base = fmtElapsed(elapsedSec);
+    if (!hintCool) return base;
+    if (elapsedSec >= 360) return `${base} · 可能已冷却`;
+    if (elapsedSec >= 270) return `${base} · 临近冷却`;
+    return base;
+  }
+
+  function elapsedSpan(ts, hintCool = true) {
+    if (!ts || ts <= 0) return '';
+    const el = Math.max(0, nowSec() - ts);
+    const warnCls = hintCool && el >= 270 ? ' up-warn' : '';
+    return `<span class="num${warnCls}" data-up-ts="${Math.round(ts)}" data-up-cool="${hintCool ? '1' : '0'}">${esc(elapsedTextWithHint(el, hintCool))}</span>`;
+  }
+
   function tickCountdowns() {
     const cur = nowSec();
     document.querySelectorAll('[data-cd-ts]').forEach((el) => {
@@ -442,6 +510,144 @@
       const zero = el.dataset.cdZero || '已重置';
       if (ts > 0) el.textContent = fmtDuration(ts - cur, zero);
     });
+    document.querySelectorAll('[data-up-ts]').forEach((el) => {
+      const ts = Number(el.dataset.upTs || 0);
+      const hintCool = el.dataset.upCool === '1';
+      if (ts > 0) {
+        const diff = Math.max(0, cur - ts);
+        el.textContent = elapsedTextWithHint(diff, hintCool);
+        el.classList.toggle('up-warn', hintCool && diff >= 270);
+      }
+    });
+  }
+
+  function cacheStatusMeta(cache) {
+    if (!cache || !cache.has_data || !cache.latest) {
+      return { pill: '', text: '暂无数据', color: 'var(--dim)' };
+    }
+    if (cache.compacted_pending) {
+      return { pill: 'pool-a', text: '压缩待首轮', color: 'var(--pool-a)' };
+    }
+    const lat = cache.latest;
+    if (lat.status === 'high') return { pill: 'ok', text: '高命中', color: 'var(--ok)' };
+    if (lat.status === 'mid') return { pill: 'warn', text: '中命中', color: 'var(--warn)' };
+    if (lat.status === 'low') return { pill: 'warn', text: '新增较多', color: 'var(--warn)' };
+    if (lat.status === 'miss') return { pill: 'bad', text: '失效重建', color: 'var(--bad)' };
+    if (lat.status === 'cold') {
+      return { pill: 'pool-a', text: lat.after_compact ? '压缩首轮' : '冷启动', color: 'var(--pool-a)' };
+    }
+    return { pill: '', text: '正常', color: 'var(--dim)' };
+  }
+
+  function cacheTurnStatusLabel(t) {
+    if (!t) return '';
+    if (t.status === 'high') return '高命中';
+    if (t.status === 'mid') return '中命中';
+    if (t.status === 'low') return '新增较多（旧前缀保留）';
+    if (t.status === 'miss') return '缓存失效重建';
+    if (t.status === 'cold') return t.after_compact ? '压缩后首轮（冷启）' : '会话首轮（冷启）';
+    return t.status || '';
+  }
+
+  function renderCacheOverviewStrip(cache) {
+    if (!cache || !cache.has_data || !cache.latest) return '';
+    const lat = cache.latest;
+    const seg = cache.segment || {};
+    const ses = cache.session || {};
+    const cm = cacheStatusMeta(cache);
+    const barPct = Math.max(0, Math.min(100, Number(lat.hit_rate_pct || 0)));
+    const barColor = lat.status === 'miss' ? 'var(--bad)' : (lat.status === 'cold' ? 'var(--pool-a)' : cm.color);
+    const scopeTxt = cache.has_compaction && seg.turns > 0
+      ? `本段 ${Number(seg.hit_rate_pct || 0).toFixed(1)}% · 整场 ${Number(ses.hit_rate_pct || 0).toFixed(1)}%`
+      : `累计 ${Number(ses.hit_rate_pct || 0).toFixed(1)}% (${ses.turns || 0}轮${ses.misses > 0 ? ` · ${ses.misses}失效` : ''})`;
+    const elHtml = lat.ts > 0 ? elapsedSpan(lat.ts, !cache.compacted_pending) : '';
+    return `<div class="cache-strip" data-jump="context" title="点击查看 Prompt 缓存逐轮命中轨迹">
+      <div class="meta-row" style="margin-top:0">
+        <span style="color:var(--fg);font-weight:600;display:inline-flex;align-items:center;gap:5px">
+          <span>Prompt 缓存</span>
+          <span class="pill ${cm.pill} num" style="font-size:10px;padding:1px 5px">${esc(cm.text)} ${Number(lat.hit_rate_pct || 0).toFixed(1)}%</span>
+        </span>
+        <span class="num">读 <strong style="color:var(--fg)">${fmtTok(lat.cache_read_tokens)}</strong> · 新 ${fmtTok(lat.uncached_input_tokens)}</span>
+      </div>
+      <div class="cache-bar"><div class="cache-bar-fill" style="width:${barPct}%;background:${barColor}"></div></div>
+      <div class="meta-row">
+        <span class="num">${esc(scopeTxt)}</span>
+        <span>${elHtml}</span>
+      </div>
+    </div>`;
+  }
+
+  function renderCacheCard(cache) {
+    if (!cache || !cache.has_data || !cache.latest) return '';
+    const lat = cache.latest;
+    const seg = cache.segment || {};
+    const ses = cache.session || {};
+    const recent = cache.recent || [];
+    const cm = cacheStatusMeta(cache);
+    const showSeg = Boolean(cache.has_compaction && seg.turns > 0);
+    const elHtml = lat.ts > 0 ? elapsedSpan(lat.ts, !cache.compacted_pending) : '';
+    const prefTxt = lat.prefix_retention_pct !== null && lat.prefix_retention_pct !== undefined
+      ? ` · 前缀复用 ${Number(lat.prefix_retention_pct).toFixed(1)}%`
+      : '';
+    const totalTurns = Number(ses.turns || recent.length);
+    const startTurnNo = Math.max(1, totalTurns - recent.length + 1);
+
+    const barsHtml = recent.map((t, i) => {
+      const turnNo = startTurnNo + i;
+      const pctVal = Number(t.hit_rate_pct || 0);
+      const minH = (t.status === 'miss' || t.status === 'cold') ? 22 : 12;
+      const h = Math.max(minH, Math.min(100, Math.round(pctVal)));
+      const pfx = t.prefix_retention_pct !== null && t.prefix_retention_pct !== undefined
+        ? ` · 上轮前缀复用 ${Number(t.prefix_retention_pct).toFixed(1)}%`
+        : '';
+      const timeTxt = t.ts > 0 ? ` · ${fmtClock(t.ts)}` : '';
+      const tip = `第 ${turnNo} 轮 · ${cacheTurnStatusLabel(t)} · 命中 ${pctVal.toFixed(1)}%（读 ${fmtTok(t.cache_read_tokens)} / 新 ${fmtTok(t.uncached_input_tokens)}）${pfx}${timeTxt}`;
+      const cls = `cache-col${t.after_compact && i > 0 ? ' after-compact' : ''}`;
+      return `<div class="${cls}" title="${esc(tip)}"><div class="cache-seg ${esc(t.status || 'high')}" style="height:${h}%"></div></div>`;
+    }).join('');
+
+    const rightBoxTitle = showSeg ? `本段压缩后 (${seg.turns}轮)` : `整场累计 (${ses.turns}轮)`;
+    const rightBoxPct = showSeg ? Number(seg.hit_rate_pct || 0) : Number(ses.hit_rate_pct || 0);
+    const rightBoxRead = showSeg ? seg.cache_read_tokens : ses.cache_read_tokens;
+    const rightBoxMiss = showSeg ? (seg.misses || 0) : (ses.misses || 0);
+
+    return `<section class="card">
+      <div class="ch">
+        <span class="ctitle">Prompt 缓存命中 <span class="pill ${cm.pill}">${esc(cm.text)}</span></span>
+        <span class="sub">${elHtml || `${ses.turns} 轮记录`}</span>
+      </div>
+      <div class="roll-head" style="margin-bottom:6px">
+        <div class="roll-kpi">
+          <div class="roll-kpi-lbl">最新一轮命中率</div>
+          <div class="roll-kpi-val num" style="color:${cm.color}">${Number(lat.hit_rate_pct || 0).toFixed(1)}%</div>
+          <div class="roll-kpi-sub num">读 ${fmtTok(lat.cache_read_tokens)} / 新 ${fmtTok(lat.uncached_input_tokens)}${esc(prefTxt)}</div>
+        </div>
+        <div class="roll-kpi">
+          <div class="roll-kpi-lbl">${esc(rightBoxTitle)}</div>
+          <div class="roll-kpi-val num">${rightBoxPct.toFixed(1)}%</div>
+          <div class="roll-kpi-sub num">读 ${fmtTok(rightBoxRead)} · ${rightBoxMiss > 0 ? `<span style="color:var(--bad)">${rightBoxMiss}次失效</span>` : '0次失效'}</div>
+        </div>
+      </div>
+      ${showSeg ? `<div class="chips" style="margin-top:0;margin-bottom:4px">
+        <span class="chip num">整场累计 <strong>${Number(ses.hit_rate_pct || 0).toFixed(1)}%</strong> (${ses.turns}轮)</span>
+        <span class="chip num">累计缓存读 <strong>${fmtTok(ses.cache_read_tokens)}</strong></span>
+        <span class="chip num">失效重建 <strong>${ses.misses || 0}次</strong></span>
+      </div>` : ''}
+      ${cache.compacted_pending ? `<div class="callout info" style="margin-top:6px">已执行 <span class="mono">/compact</span>，下条消息将基于压缩摘要重新冷启写入缓存。</div>` : ''}
+      ${!cache.compacted_pending && lat.status === 'miss' ? `<div class="callout bad" style="margin-top:6px">上一轮发生缓存失效重建（新增写入 ${fmtTok(lat.uncached_input_tokens)} tok${lat.prefix_retention_pct !== null && lat.prefix_retention_pct !== undefined ? `，前缀仅保留 ${Number(lat.prefix_retention_pct).toFixed(1)}%` : ''}），继续对话下一轮起将恢复高命中。</div>` : ''}
+      ${recent.length ? `
+        <div class="cache-spark">${barsHtml}</div>
+        <div class="cache-legend">
+          <span class="cache-legend-items">
+            <span><i class="cache-dot" style="background:var(--ok)"></i>≥80%</span>
+            <span><i class="cache-dot" style="background:var(--warn)"></i>中/新增多</span>
+            <span><i class="cache-dot" style="background:var(--bad)"></i>失效</span>
+            <span><i class="cache-dot" style="background:var(--pool-a)"></i>冷启</span>
+          </span>
+          <span class="num">近 ${recent.length} 轮轨迹（悬停看明细）</span>
+        </div>` : ''}
+      <div class="sub" style="margin-top:6px;line-height:1.4">取自对话库原生 <span class="mono">model_usage</span>（缓存读 / 新增输入）；独立生图调用不走对话前缀缓存。</div>
+    </section>`;
   }
 
   function healthCls(h) {
@@ -786,6 +992,7 @@
           <span class="pill ${nearBudget ? 'warn' : ''}">${ctx.limit_tokens ? `${ctx.used_pct.toFixed(1)}%` : '--'}${nearBudget ? ` · 接近单次预算 ${fmtTok(budget)}` : ''}</span>
         </div>
         <div class="grid">${cells.map((col) => `<span class="dot"${col ? ` style="background:${col}"` : ''}></span>`).join('')}</div>
+        ${renderCacheOverviewStrip(ctx.cache)}
         ${topCats.length ? `<div class="sum-grid">${topCats.map((c) => `
           <div class="sum-item">
             <span class="sum-left"><span class="mark" style="background:${CAT_COLOR[c.key] || 'var(--dim)'}"></span><span>${esc(CAT_LABEL[c.key] || c.name)}</span></span>
@@ -1276,6 +1483,10 @@
         </div>
       </div>
     </section>`);
+
+    if (ctx.cache && ctx.cache.has_data) {
+      parts.push(renderCacheCard(ctx.cache));
+    }
 
     if (ctx.checkpoint_view) {
       const ck = ctx.checkpoint_view;

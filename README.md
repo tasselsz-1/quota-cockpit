@@ -2,7 +2,7 @@
 
 > Antigravity 2.0 侧边栏三合一实时监控插件（Sidecar AUX Pane）——零模型 Token 消耗、零外部 npm 依赖、严格只读本地数据。
 >
-> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5-hour rolling Image Generation Quota**, **Dual Model Quota Pools (5h + Weekly)**, and **Exact Conversation Context Breakdown** in one dashboard.
+> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5-hour rolling Image Generation Quota**, **Dual Model Quota Pools (5h + Weekly)**, and **Exact Conversation Context & Prompt Cache Hit Analytics** in one dashboard.
 
 ## 核心功能
 
@@ -18,9 +18,10 @@
 - 顶栏常驻当前对话模型的 `5h + 周额度` 速览条；自动高亮当前对话所在配额池，并按双窗口瓶颈 `min(5h, weekly)` 在低于 20% 且对侧池充裕时给出跨池切换建议。
 - 标注模型梯队与角色（`T0`–`T4`、`IMG`），并提示生图模型虽在接口中归属池 A，但实际调用命中后端独立 5h 生图桶。
 
-### 3. 当前对话上下文 · Exact `/context` 明细
+### 3. 当前对话上下文与 Prompt 缓存命中 · Exact `/context` 明细
 - 解析原生对话 protobuf，实时显示 `used / limit tokens`、单次请求预算预警、100 点占用网格、分类占比（用户 / 模型 / 工具 / 系统 / Rules / Skills / MCP）、Checkpoints 及已加载的 Knowledge / Artifact / Skill / System 文件列表。
-- 支持一键复制纯文本报告，便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
+- **Prompt 缓存命中监控**：直接解析本地对话库逐轮 `model_usage`（`cache_read_tokens` 与 `uncached_input_tokens`），在总览与上下文详情页实时展示最新一轮缓存命中率、上轮前缀复用率、当前 `/compact` 压缩段与整场累计命中率、真实缓存失效重建次数（自动区分冷启/新增大文件与真超时失效）、距上轮请求时长（含冷却提示）及近 16 轮命中率迷你轨迹图。
+- 支持一键复制纯文本报告（含 Prompt 缓存摘要），便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
 
 ## 环境要求
 
@@ -80,7 +81,8 @@ quota-cockpit/
 │   └── context_report.py        # 对话 protobuf 上下文解析器
 └── tests/
     ├── test_pools.mjs           # Node.js 单元测试
-    └── test_quota_report.py     # Python 单元测试
+    ├── test_quota_report.py     # 生图配额 Python 单元测试
+    └── test_context_report.py   # 上下文与 Prompt 缓存 Python 单元测试
 ```
 
 ## 运行单元测试
