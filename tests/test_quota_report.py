@@ -785,6 +785,60 @@ class QuotaReportTests(unittest.TestCase):
         self.assertFalse(cal["latest_lock"]["is_clean"])
         self.assertNotEqual(rep["anchor"]["source"], "calibrated_429")
 
+    def test_pin_and_unpin_peak_persists_across_gc_and_uses_with_refs_tokens(self) -> None:
+        # Surviving DB only has 59 calls (1-ref each) -> unpinned ceiling is 59
+        t_base = int(self.now - 3600)
+        rows = [
+            (i + 1, 91, 3, make_metadata(t_base + i * 30, args={"Prompt": "a" * 400, "ImagePaths": ["/r.png"]}), None)
+            for i in range(59)
+        ]
+        db_p = self.conv_dir / "conv-59-pin.db"
+        create_conv_db(db_p, rows, self.now - 10)
+        cache_file = self.root / "image-scan-cache.json"
+        cal_file = self.root / "image-calibration.json"
+
+        rep_before = quota_report.build_report(self.conv_dir, cache_path=cache_file, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep_before["anchor"]["source"], "safe_watermark")
+        self.assertEqual(rep_before["anchor"]["ref_calls"], 59)
+        self.assertEqual(rep_before["anchor"]["pinned_calls"], 0)
+
+        # Pin peak to 100 -> immediately anchors at 100 calls * with_refs avg tokens (100+1120+1120+250 = 2590)
+        pinned = quota_report.pin_calibration_peak(cal_file, 100, now_ts=self.now)
+        self.assertIsNotNone(pinned)
+        self.assertEqual(pinned["calls"], 100)
+
+        rep_pinned = quota_report.build_report(self.conv_dir, cache_path=cache_file, calibration_path=cal_file, now=self.now)
+        anc = rep_pinned["anchor"]
+        self.assertEqual(anc["source"], "pinned_peak")
+        self.assertEqual(anc["ref_calls"], 100)
+        self.assertEqual(anc["pinned_calls"], 100)
+        self.assertEqual(anc["ref_tokens_source"], "pinned_calls_x_with_refs")
+        self.assertEqual(anc["ref_tokens"], 100 * 2590)
+        self.assertEqual(anc["remaining_calls"], 41)
+        self.assertEqual(anc["est_remaining_imgs_with_refs"], 41)
+        self.assertEqual(rep_pinned["calibration"]["pinned_peak"]["calls"], 100)
+
+        # Even if DB is deleted and cache cleared, pinned peak stays locked at 100
+        db_p.unlink()
+        fresh_cache = self.root / "fresh-cache.json"
+        rep_after_gc = quota_report.build_report(self.conv_dir, cache_path=fresh_cache, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep_after_gc["anchor"]["source"], "pinned_peak")
+        self.assertEqual(rep_after_gc["anchor"]["ref_calls"], 100)
+
+        # Explicit manual mode still takes precedence over pin
+        rep_manual = quota_report.build_report(
+            self.conv_dir, anchor_mode="manual", soft_cap=40, hard_cap=50, cache_path=fresh_cache, calibration_path=cal_file, now=self.now
+        )
+        self.assertEqual(rep_manual["anchor"]["source"], "manual")
+        self.assertEqual(rep_manual["anchor"]["ref_calls"], 50)
+
+        # Unpinning returns cleanly to learned watermark (59 from persistent best_safe_peak)
+        self.assertIsNone(quota_report.pin_calibration_peak(cal_file, 0, now_ts=self.now))
+        rep_unpinned = quota_report.build_report(self.conv_dir, cache_path=fresh_cache, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep_unpinned["anchor"]["source"], "safe_watermark")
+        self.assertEqual(rep_unpinned["anchor"]["ref_calls"], 59)
+        self.assertIsNone(rep_unpinned["calibration"]["pinned_peak"])
+
     def test_context_report_import_sanity(self) -> None:
         self.assertTrue(callable(context_report.load))
         self.assertTrue(callable(context_report.collect_stats))

@@ -1341,6 +1341,7 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
         "avg_attempts_at_weekly_lock": round(sum(o["attempts"] for o in weekly_observations) / len(weekly_observations), 1) if weekly_observations else None,
         "avg_tokens_at_weekly_lock": int(round(sum(o["tokens_total"] for o in weekly_observations) / len(weekly_observations))) if weekly_observations else None,
         "observed_7d_safe_peak": peak_7d,
+        "pinned_peak": None,
         "persisted_safe_peak_used": False,
         "calibration_persisted": False,
     }
@@ -1437,6 +1438,27 @@ def _merge_peak_dicts(live_raw: Any, saved_raw: Any, max_saved_ts: float = 0.0) 
     return out
 
 
+def _normalize_pinned_peak(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        calls = int(raw.get("calls") or 0)
+    except (TypeError, ValueError):
+        return None
+    if calls <= 0:
+        return None
+    calls = max(1, min(5000, calls))
+    try:
+        tok = max(0, int(raw.get("tokens_total") or 0))
+    except (TypeError, ValueError):
+        tok = 0
+    try:
+        at = round(max(0.0, float(raw.get("pinned_at") or 0.0)), 3)
+    except (TypeError, ValueError):
+        at = 0.0
+    return {"calls": calls, "tokens_total": tok, "pinned_at": at}
+
+
 def _empty_calibration_ledger() -> dict[str, Any]:
     return {
         "version": CALIBRATION_LEDGER_VERSION,
@@ -1445,6 +1467,7 @@ def _empty_calibration_ledger() -> dict[str, Any]:
         "best_7d_safe_peak": _empty_peak_dict(),
         "lock_observations": [],
         "weekly_lock_observations": [],
+        "pinned_peak": None,
     }
 
 
@@ -1464,6 +1487,7 @@ def load_calibration_ledger(ledger_path: Path | None) -> dict[str, Any]:
             "best_7d_safe_peak": _normalize_peak_dict(raw.get("best_7d_safe_peak")),
             "lock_observations": locks_5h[-24:],
             "weekly_lock_observations": locks_7d[-12:],
+            "pinned_peak": _normalize_pinned_peak(raw.get("pinned_peak")),
         }
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return _empty_calibration_ledger()
@@ -1473,6 +1497,31 @@ def save_calibration_ledger(ledger_path: Path | None, ledger: dict[str, Any]) ->
     if not ledger_path:
         return
     save_cache(ledger_path, ledger)
+
+
+def pin_calibration_peak(
+    ledger_path: Path | None,
+    calls: int,
+    tokens_total: int = 0,
+    now_ts: float = 0.0,
+) -> dict[str, Any] | None:
+    """Pin (calls > 0) or unpin (calls <= 0) the 5h image ceiling in the persistent ledger."""
+    if not ledger_path:
+        return None
+    ledger = load_calibration_ledger(ledger_path)
+    ts_now = round(now_ts if now_ts > 0.0 else time.time(), 3)
+    if int(calls or 0) <= 0:
+        pinned = None
+    else:
+        pinned = {
+            "calls": max(1, min(5000, int(calls))),
+            "tokens_total": max(0, int(tokens_total or 0)),
+            "pinned_at": ts_now,
+        }
+    ledger["pinned_peak"] = pinned
+    ledger["updated_at"] = ts_now
+    save_calibration_ledger(ledger_path, ledger)
+    return pinned
 
 
 def reset_calibration_ledger(ledger_path: Path | None) -> bool:
@@ -1555,6 +1604,7 @@ def merge_calibration_with_ledger(
     truncated_locks = [o for o in merged_locks if o.get("is_truncated")]
     noisy_locks = [o for o in merged_locks if not o.get("is_clean")]
 
+    pinned_peak = _normalize_pinned_peak(saved.get("pinned_peak"))
     next_ledger = {
         "version": CALIBRATION_LEDGER_VERSION,
         "updated_at": round(now_ts if now_ts > 0.0 else time.time(), 3),
@@ -1562,14 +1612,17 @@ def merge_calibration_with_ledger(
         "best_7d_safe_peak": merged_7d,
         "lock_observations": merged_locks,
         "weekly_lock_observations": merged_wlocks,
+        "pinned_peak": pinned_peak,
     }
-    comparable_saved = {k: saved.get(k) for k in ("best_safe_peak", "best_7d_safe_peak", "lock_observations", "weekly_lock_observations")}
-    comparable_next = {k: next_ledger.get(k) for k in ("best_safe_peak", "best_7d_safe_peak", "lock_observations", "weekly_lock_observations")}
+    cmp_keys = ("best_safe_peak", "best_7d_safe_peak", "lock_observations", "weekly_lock_observations", "pinned_peak")
+    comparable_saved = {k: saved.get(k) for k in cmp_keys}
+    comparable_next = {k: next_ledger.get(k) for k in cmp_keys}
     has_any_data = (
         merged_peak["max_attempts"] > 0
         or merged_7d["max_attempts"] > 0
         or bool(merged_locks)
         or bool(merged_wlocks)
+        or pinned_peak is not None
     )
     if comparable_next != comparable_saved or (has_any_data and not ledger_path.is_file()):
         save_calibration_ledger(ledger_path, next_ledger)
@@ -1596,6 +1649,7 @@ def merge_calibration_with_ledger(
         "avg_attempts_at_weekly_lock": round(sum(o["attempts"] for o in merged_wlocks) / len(merged_wlocks), 1) if merged_wlocks else None,
         "avg_tokens_at_weekly_lock": int(round(sum(o["tokens_total"] for o in merged_wlocks) / len(merged_wlocks))) if merged_wlocks else None,
         "observed_7d_safe_peak": merged_7d,
+        "pinned_peak": pinned_peak,
         "persisted_safe_peak_used": persisted_used,
         "calibration_persisted": True,
     })
@@ -1726,6 +1780,10 @@ def compute_anchor(
         lock_upper_tokens = None
         lock_upper_is_noisy = False
 
+    pinned_info = calibration.get("pinned_peak") if isinstance(calibration.get("pinned_peak"), dict) else None
+    pinned_calls = int(pinned_info.get("calls") or 0) if pinned_info else 0
+    pinned_tokens = int(pinned_info.get("tokens_total") or 0) if pinned_info else 0
+
     notes: list[str] = []
     exceeded_safe_peak = False
     is_hard_ceiling = True
@@ -1761,6 +1819,39 @@ def compute_anchor(
             health = "warning"
         else:
             health = "ok"
+    elif pinned_calls >= 1:
+        source = "pinned_peak"
+        label = "固定峰值上限（带垫图折算）"
+        is_hard_ceiling = True
+        ref_calls = pinned_calls
+        soft_calls = max(1, int(round(ref_calls * 0.85)))
+        est_tokens_from_calls = int(round(ref_calls * avg_wr_tok))
+        if pinned_tokens > 0 and pinned_tokens >= est_tokens_from_calls:
+            ref_tokens = pinned_tokens
+            ref_tokens_source = "pinned_tokens"
+        else:
+            ref_tokens = max(1, est_tokens_from_calls)
+            ref_tokens_source = "pinned_calls_x_with_refs"
+        raw_calls_pct = round(metric_used / ref_calls * 100.0, 1)
+        raw_tokens_pct = round(tokens_used / ref_tokens * 100.0, 1)
+        used_pct = round(min(100.0, max(raw_calls_pct, raw_tokens_pct)), 1)
+        used_pct_basis = "tokens" if raw_tokens_pct >= raw_calls_pct else "calls"
+        exceeded_safe_peak = metric_used > ref_calls
+        remaining_calls = max(0, ref_calls - metric_used)
+        remaining_tokens = max(0, ref_tokens - tokens_used)
+        if cooldown_active:
+            health = "locked"
+        elif metric_used >= ref_calls or tokens_used >= ref_tokens:
+            health = "critical"
+        elif metric_used >= soft_calls or used_pct >= 85.0:
+            health = "warning"
+        else:
+            health = "ok"
+        notes.append(
+            f"已固定 5h 峰值上限为 {ref_calls} 次（按带垫图均图 {avg_wr_tok / 1000.0:.2f}k tok 折算 ~{ref_tokens / 1000.0:.1f}k tok），不受旧对话清理或时间滚出影响"
+        )
+        if safe_lower_calls > ref_calls:
+            notes.append(f"另实测到更高 0-429 安全峰 {safe_lower_calls} 次，可在面板一键更新固定峰值")
     elif clean_count >= 1 and (
         safe_lower_calls < 10
         or (lock_upper_calls is not None and lock_upper_calls >= safe_lower_calls)
@@ -1929,6 +2020,8 @@ def compute_anchor(
         "lock_upper_calls": lock_upper_calls,
         "lock_upper_tokens": lock_upper_tokens,
         "lock_upper_is_noisy": lock_upper_is_noisy,
+        "pinned_calls": pinned_calls,
+        "pinned_tokens": pinned_tokens,
         "notes": notes,
     }
 
@@ -2147,15 +2240,21 @@ def main() -> None:
     parser.add_argument("--cache", default="")
     parser.add_argument("--calibration", default="")
     parser.add_argument("--reset-calibration", action="store_true")
+    parser.add_argument("--pin-peak", type=int, default=None)
+    parser.add_argument("--unpin-peak", action="store_true")
     args = parser.parse_args()
 
     cache_p = Path(args.cache) if args.cache else None
     cal_p = Path(args.calibration) if args.calibration else None
+    target_cal = cal_p if cal_p is not None else (
+        cache_p.with_name("image-calibration.json") if cache_p is not None else None
+    )
     if args.reset_calibration:
-        target_cal = cal_p if cal_p is not None else (
-            cache_p.with_name("image-calibration.json") if cache_p is not None else None
-        )
         reset_calibration_ledger(target_cal)
+    if args.unpin_peak:
+        pin_calibration_peak(target_cal, 0)
+    elif args.pin_peak is not None:
+        pin_calibration_peak(target_cal, args.pin_peak)
     report = build_report(
         conv_dir=Path(args.conv_dir),
         workspace=args.workspace or None,

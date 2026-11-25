@@ -289,6 +289,23 @@
   .band-title { font-size: 10.5px; color: var(--dim); font-weight: 600; }
   .band-main { font-size: 14px; font-weight: 700; margin: 2px 0; color: var(--fg); }
   .band-sub { font-size: 10.5px; color: var(--dim); line-height: 1.35; }
+  .pin-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
+    padding: 6px 8px; margin-bottom: 8px; border-radius: 7px; font-size: 11px;
+    border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+    background: color-mix(in srgb, var(--bg) 45%, transparent);
+  }
+  .pin-bar.pinned {
+    border-color: color-mix(in srgb, var(--pool-a) 50%, transparent);
+    background: color-mix(in srgb, var(--pool-a) 8%, transparent);
+  }
+  .pin-left { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); font-weight: 600; }
+  .pin-left input {
+    width: 62px; padding: 2px 6px; font-size: 12px; font-weight: 600; text-align: right;
+    border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  .pin-actions { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .pin-actions button { padding: 3px 8px; font-size: 11px; }
 
   .tok-breakdown { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
   .manual-box.dimmed { opacity: .62; }
@@ -433,6 +450,7 @@
     lastHdrQuotaKey: '',
     inFlight: false,
     toast: null,
+    pinToast: null,
     calResetArmUntil: 0,
   };
 
@@ -1007,9 +1025,12 @@
         ? `<span class="chip num" title="进度条取次数(${callsPct.toFixed(1)}%)与Token(${tokensPct.toFixed(1)}%)中的较高值：${w5.used_pct}%">占比 ${pctBasis === 'tokens' ? `<strong>Tok${Math.round(tokensPct)}%</strong>/次${Math.round(callsPct)}%` : `<strong>次${Math.round(callsPct)}%</strong>/Tok${Math.round(tokensPct)}%`}</span>`
         : '';
 
+      const pinPill = anc.source === 'pinned_peak'
+        ? ` <span class="pill pool-a num" title="已固定 5h 峰值上限，不受旧对话清理或时间滚出影响">固定 ${refCalls}次</span>`
+        : '';
       parts.push(`<section class="card">
         <div class="ch">
-          <span class="ctitle">生图配额 · 5h 滚轴 <span class="pill ${meta.pill}">${meta.text}</span></span>
+          <span class="ctitle">生图配额 · 5h 滚轴 <span class="pill ${meta.pill}">${meta.text}</span>${pinPill}</span>
           <button class="link-btn" data-jump="image">详情 →</button>
         </div>
         ${mainVal}
@@ -1340,18 +1361,29 @@
           : `仅高 EOF 噪声锁（${latestLock.ok}成/${latestLock.eof}EOF），未作硬上限`)
         : '近 30 天未触发 5h 配额耗尽，仅依赖安全峰值推算');
     const byRefs = avg.by_refs || [];
-    const persistedTag = cal.persisted_safe_peak_used ? ' · 永久账本保护' : '';
-    const safeSub = anc.ref_tokens_source === 'calls_x_with_refs'
-      ? `实测0-429峰 ${fmtTok(anc.safe_lower_tokens || peak.max_tokens_total || 0)} · 最高成功 ${peak.max_ok || 0} 次${persistedTag}`
-      : `最高成功 ${peak.max_ok || 0} 次${peak.max_tokens_at ? ` · 峰值 ${fmtDateTime(peak.max_tokens_at)}` : ''}${persistedTag}`;
+    const pinnedPeak = cal.pinned_peak || null;
+    const pinnedCalls = Number(anc.pinned_calls || pinnedPeak?.calls || 0);
+    const isPinned = pinnedCalls >= 1 && anc.mode !== 'manual';
+    const persistedTag = isPinned
+      ? ' · 已固定锁定'
+      : (cal.persisted_safe_peak_used ? ' · 永久账本保护' : '');
+    const safeTitle = isPinned
+      ? '已固定峰值上限 (永久锁定)'
+      : (anc.ref_tokens_source === 'calls_x_with_refs' ? '预估上限 (已证次数×带垫图)' : '已证安全下界 (30d 无 429)');
+    const safeSub = isPinned
+      ? `当前实测 0-429 峰 ${anc.safe_lower_calls || peak.max_attempts || 0} 次 · 按带垫图均图折算${persistedTag}`
+      : (anc.ref_tokens_source === 'calls_x_with_refs'
+        ? `实测0-429峰 ${fmtTok(anc.safe_lower_tokens || peak.max_tokens_total || 0)} · 最高成功 ${peak.max_ok || 0} 次${persistedTag}`
+        : `最高成功 ${peak.max_ok || 0} 次${peak.max_tokens_at ? ` · 峰值 ${fmtDateTime(peak.max_tokens_at)}` : ''}${persistedTag}`);
+    const higherObsCalls = Number(anc.safe_lower_calls || peak.max_attempts || 0);
     parts.push(`<section class="card">
       <div class="ch">
-        <span class="ctitle">自学习水位带 & 均图 Token</span>
+        <span class="ctitle">自学习水位带 & 均图 Token ${isPinned ? `<span class="pill pool-a num">固定 ${pinnedCalls}次</span>` : ''}</span>
         <span class="sub num">30d 样本 ${avg.sample_count || 0} 次</span>
       </div>
       <div class="band-grid">
         <div class="band-box safe">
-          <div class="band-title">${anc.ref_tokens_source === 'calls_x_with_refs' ? '预估上限 (已证次数×带垫图)' : '已证安全下界 (30d 无 429)'}</div>
+          <div class="band-title">${esc(safeTitle)}</div>
           <div class="band-main num">${refCalls} 次 · ${fmtTok(refTokens)}</div>
           <div class="band-sub num">${esc(safeSub)}</div>
         </div>
@@ -1361,6 +1393,19 @@
           <div class="band-sub">${esc(lockSub)}${cal.rpm_burst_count ? ` · 另剥离 ${cal.rpm_burst_count} 次瞬时 RPM` : ''}</div>
         </div>
       </div>
+      <form id="pin-peak-form" class="pin-bar${isPinned ? ' pinned' : ''}">
+        <label class="pin-left" for="inp-pin-calls">
+          <span>${isPinned ? '峰值已固定' : '峰值固定'}</span>
+          <input id="inp-pin-calls" name="calls" class="num" type="number" min="1" max="5000" value="${isPinned ? pinnedCalls : refCalls}" title="输入要固定的 5h 生图峰值张数（如 100），固定后永不回退">
+          <span class="dim" style="font-weight:500">次</span>
+        </label>
+        <div class="pin-actions">
+          <button type="submit" class="primary">${isPinned ? '更新固定' : '固定峰值'}</button>
+          ${isPinned && higherObsCalls > pinnedCalls ? `<button type="button" id="btn-pin-observed" data-calls="${higherObsCalls}">用实测 ${higherObsCalls}</button>` : ''}
+          ${isPinned ? '<button type="button" id="btn-unpin-peak">取消固定</button>' : ''}
+        </div>
+      </form>
+      ${state.pinToast ? `<div class="sub" style="margin:-3px 0 7px;color:${state.pinToast.err ? 'var(--bad)' : 'var(--ok)'}">${esc(state.pinToast.msg)}</div>` : ''}
       ${byRefs.length ? `<table class="stat-table num">
         <thead><tr><th>参考图</th><th>样本</th><th>均Prompt</th><th>均含思考Tok</th><th>API等效</th></tr></thead>
         <tbody>
@@ -1702,8 +1747,8 @@
     if (!d) return;
     updateHeader(d);
 
-    // Avoid overwriting form inputs while the user is editing settings
-    if (!force && state.tab === 'image' && document.activeElement?.closest('#settings-form')) {
+    // Avoid overwriting form inputs while the user is editing settings or pinned peak
+    if (!force && state.tab === 'image' && document.activeElement?.closest('#settings-form, #pin-peak-form')) {
       return;
     }
 
@@ -1715,6 +1760,7 @@
       state.tab,
       d.settings,
       state.toast?.id || 0,
+      state.pinToast?.id || 0,
       po.fetchedAt, po.activePoolKey, po.stale, po.error, po.quotaSummaryAvailable,
       (po.pools || []).map((p) => [
         p.key, p.remainingPct, p.bottleneckWindow,
@@ -1729,6 +1775,7 @@
       iq.anchor?.status, iq.anchor?.source, iq.anchor?.ref_calls, iq.anchor?.ref_tokens,
       iq.anchor?.calls_pct, iq.anchor?.tokens_pct, iq.anchor?.used_pct_basis, iq.anchor?.remaining_calls,
       iq.anchor?.remaining_tokens, iq.anchor?.est_remaining_imgs_with_refs,
+      iq.anchor?.pinned_calls, iq.calibration?.pinned_peak?.calls,
       iq.calibration?.persisted_safe_peak_used, iq.calibration?.truncated_lock_count, iq.scan_meta?.archived_dbs,
       Date.now() < state.calResetArmUntil,
       iq.per_image_avg?.with_refs?.avg_tokens_total,
@@ -1810,6 +1857,35 @@
     }
   }
 
+  async function pinPeak(calls, unpin = false) {
+    try {
+      const res = await window.sidecar.fetch('/api/calibration/pin', {
+        method: 'POST',
+        body: JSON.stringify({
+          calls: unpin ? 0 : calls,
+          unpin,
+          workspace: state.workspace,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      if (state.dash) {
+        if (json.imageQuota) state.dash.imageQuota = json.imageQuota;
+        if (json.serverNow) state.clockOffsetSec = json.serverNow - Math.floor(Date.now() / 1000);
+        state.dash.updatedAt = new Date().toISOString();
+      }
+      state.pinToast = {
+        id: Date.now(),
+        msg: unpin ? '已取消固定，恢复自动水位带学习' : `已永久固定 5h 峰值为 ${json.pinnedPeak?.calls || calls} 次`,
+        err: false,
+      };
+      render(true);
+    } catch (err) {
+      state.pinToast = { id: Date.now(), msg: `操作失败：${err.message}`, err: true };
+      render(true);
+    }
+  }
+
   async function resetCalibration() {
     try {
       const res = await window.sidecar.fetch('/api/calibration/reset', {
@@ -1882,6 +1958,17 @@
       copyText(state.dash.context.text, copyBtn);
       return;
     }
+    const unpinBtn = e.target.closest('#btn-unpin-peak');
+    if (unpinBtn) {
+      pinPeak(0, true);
+      return;
+    }
+    const pinObsBtn = e.target.closest('#btn-pin-observed');
+    if (pinObsBtn) {
+      const c = Number(pinObsBtn.dataset.calls || 0);
+      if (c > 0) pinPeak(c, false);
+      return;
+    }
     const resetBtn = e.target.closest('#btn-reset-auto');
     if (resetBtn) {
       saveSettings({ anchorMode: 'auto', softCap: 54, hardCap: 60, tokenCap: 0, countMode: 'attempts' });
@@ -1912,6 +1999,18 @@
   });
 
   $('view').addEventListener('submit', (e) => {
+    const pinForm = e.target.closest('#pin-peak-form');
+    if (pinForm) {
+      e.preventDefault();
+      const calls = Math.round(Number(pinForm.elements.calls.value));
+      if (!Number.isFinite(calls) || calls < 1 || calls > 5000) {
+        state.pinToast = { id: Date.now(), msg: '请输入 1–5000 之间的峰值次数', err: true };
+        render(true);
+        return;
+      }
+      pinPeak(calls, false);
+      return;
+    }
     const form = e.target.closest('#settings-form');
     if (!form) return;
     e.preventDefault();

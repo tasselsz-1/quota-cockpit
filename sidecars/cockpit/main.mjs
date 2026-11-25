@@ -404,16 +404,17 @@ async function getContextReport(conversationId, workspaceUri, force = false) {
 let imageQuotaCache = { key: '', fetchedAt: 0, data: null };
 let imageQuotaInFlight = null;
 
-async function getImageQuotaReport(workspaceUri, force = false) {
+async function getImageQuotaReport(workspaceUri, force = false, extraArgs = []) {
   const workspace = workspacePath(workspaceUri);
   const s = currentSettings;
   const key = `${workspace}|${s.softCap}|${s.hardCap}|${s.tokenCap}|${s.countMode}|${s.anchorMode}`;
   const now = Date.now();
+  const hasMutation = Array.isArray(extraArgs) && extraArgs.length > 0;
 
-  if (!force && imageQuotaCache.data && imageQuotaCache.key === key && (now - imageQuotaCache.fetchedAt) < IMAGE_TTL_MS) {
+  if (!force && !hasMutation && imageQuotaCache.data && imageQuotaCache.key === key && (now - imageQuotaCache.fetchedAt) < IMAGE_TTL_MS) {
     return imageQuotaCache.data;
   }
-  if (!force && imageQuotaInFlight && imageQuotaInFlight.key === key) {
+  if (!force && !hasMutation && imageQuotaInFlight && imageQuotaInFlight.key === key) {
     return imageQuotaInFlight.promise;
   }
 
@@ -431,6 +432,7 @@ async function getImageQuotaReport(workspaceUri, force = false) {
       '--anchor-mode', s.anchorMode,
       '--cache', IMAGE_CACHE_PATH,
       '--calibration', IMAGE_CALIBRATION_PATH,
+      ...(hasMutation ? extraArgs : []),
     ];
     if (workspace) args.push('--workspace', workspace);
     const out = await run(cmd, args, 30000);
@@ -439,7 +441,9 @@ async function getImageQuotaReport(workspaceUri, force = false) {
     return parsed;
   })();
 
-  imageQuotaInFlight = { key, promise };
+  if (!hasMutation) {
+    imageQuotaInFlight = { key, promise };
+  }
   try {
     return await promise;
   } finally {
@@ -489,6 +493,26 @@ app.api('/api/settings', async (data) => {
     return {
       ok: true,
       settings: currentSettings,
+      imageQuota,
+      serverNow: Math.floor(Date.now() / 1000),
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}, 'POST');
+
+app.api('/api/calibration/pin', async (data) => {
+  try {
+    const unpin = data.unpin === true || data.unpin === '1' || Number(data.calls) <= 0;
+    const extraArgs = unpin
+      ? ['--unpin-peak']
+      : ['--pin-peak', String(clampInt(data.calls, 1, 5000, 100))];
+    imageQuotaCache = { key: '', fetchedAt: 0, data: null };
+    const workspace = String(data.workspace || '').trim();
+    const imageQuota = await getImageQuotaReport(workspace, true, extraArgs);
+    return {
+      ok: true,
+      pinnedPeak: imageQuota?.calibration?.pinned_peak || null,
       imageQuota,
       serverNow: Math.floor(Date.now() / 1000),
     };
