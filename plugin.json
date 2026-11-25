@@ -2,7 +2,7 @@
   "name": "quota-cockpit",
   "displayName": "配额与上下文",
   "description": "侧边栏三合一实时监控台：生图配额（5h/7d双滚轴分段回血/官方Token与均图估算/30天自学习水位带/5h与周池429倒计时/可选工作区账本联动）、当前模型配额池（池A Gemini / 池B Claude 的 5h 与周额度双窗口实时余量及7天滚动回血预测）与当前会话精确上下文及 Prompt 缓存命中监控。零 Token 消耗。",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "author": {
     "name": "tasselsz-1",
     "url": "https://github.com/tasselsz-1"

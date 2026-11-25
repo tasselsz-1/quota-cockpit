@@ -29,10 +29,12 @@ WINDOW_24H_SEC = 24 * 3600
 WINDOW_7D_SEC = 7 * 86400
 WINDOW_30D_SEC = 30 * 86400
 WEEKLY_LOCK_THRESHOLD_SEC = 6 * 3600
+TRUNCATED_LOCK_GAP_SEC = 900.0  # >15m gap between reset_ts-5h and first local billable call => incomplete window
 
 DEFAULT_SOFT_CAP = 54   # Default conservative soft warning cap (5h window)
 DEFAULT_HARD_CAP = 60   # Default conservative baseline cap (5h window)
-CACHE_VERSION = 5
+CACHE_VERSION = 6
+CALIBRATION_LEDGER_VERSION = 1
 REQUIRED_CACHED_EVENT_FIELDS = (
     "ts",
     "end_ts",
@@ -400,15 +402,66 @@ def _is_valid_cached_events(events: Any) -> bool:
     return isinstance(events, list) and all(_is_valid_cached_event(e) for e in events)
 
 
-def load_cache(cache_path: Path | None) -> dict[str, Any]:
+KNOWN_EVENT_KINDS = ("OK", "EOF", "ERR", "RUNNING", "429", "429_WEEKLY", "429_RPM", "CLIENT_ERR")
+
+
+def _salvage_archived_event(ev: Any) -> dict[str, Any] | None:
+    """Validate or migrate a cached event from a DB that Antigravity has already GC'd."""
+    if not isinstance(ev, dict):
+        return None
+    if _is_valid_cached_event(ev):
+        return ev
+    ts = float(ev.get("ts") or 0.0)
+    kind = str(ev.get("kind") or "")
+    if ts <= 0.0 or kind not in KNOWN_EVENT_KINDS:
+        return None
+    end_ts = float(ev.get("end_ts") or ts)
+    if end_ts < ts:
+        end_ts = ts
+    n_refs = max(0, int(ev.get("n_refs") or 0))
+    prompt_tokens = max(0, int(ev.get("prompt_tokens") or 0))
+    if kind in BILLABLE_KINDS and prompt_tokens == 0 and ev.get("prompt_preview"):
+        prompt_tokens = estimate_text_tokens(str(ev.get("prompt_preview") or ""))
+    tok = compute_event_tokens(kind, prompt_tokens, n_refs)
+    merged = dict(ev)
+    merged.setdefault("step_idx", 0)
+    merged.setdefault("conv_id", "")
+    merged.setdefault("raw_status", 3 if kind == "OK" else 4)
+    merged.setdefault("duration_sec", round(max(0.0, end_ts - ts), 1))
+    merged.setdefault("image_name", "")
+    merged.setdefault("prompt_preview", "")
+    merged.setdefault("prompt_chars", len(str(merged.get("prompt_preview") or "")))
+    merged.setdefault("aspect_ratio", "")
+    merged.setdefault("model", "")
+    merged.setdefault("reset_ts", 0.0)
+    merged.setdefault("reset_iso", "")
+    merged.setdefault("retry_sec", 0.0)
+    merged.setdefault("error_summary", "")
+    merged["ts"] = round(ts, 3)
+    merged["end_ts"] = round(end_ts, 3)
+    merged["n_refs"] = n_refs
+    merged["prompt_tokens"] = prompt_tokens
+    merged.update(tok)
+    return merged if _is_valid_cached_event(merged) else None
+
+
+def _load_cache_raw(cache_path: Path | None) -> tuple[dict[str, Any], bool]:
     if not cache_path or not cache_path.is_file():
-        return {"version": CACHE_VERSION, "files": {}}
+        return {"version": CACHE_VERSION, "files": {}}, False
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("version") == CACHE_VERSION and isinstance(data.get("files"), dict):
-            return data
+        if isinstance(data, dict) and isinstance(data.get("files"), dict):
+            is_cur = data.get("version") == CACHE_VERSION
+            return {"version": data.get("version", 0), "files": data["files"]}, is_cur
     except (OSError, json.JSONDecodeError):
         pass
+    return {"version": CACHE_VERSION, "files": {}}, False
+
+
+def load_cache(cache_path: Path | None) -> dict[str, Any]:
+    data, is_cur = _load_cache_raw(cache_path)
+    if is_cur:
+        return data
     return {"version": CACHE_VERSION, "files": {}}
 
 
@@ -462,13 +515,17 @@ def scan_conversations(
     lookback_sec: float = WINDOW_30D_SEC,
     cache_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    cache = load_cache(cache_path)
-    cached_files: dict[str, Any] = cache.get("files", {})
+    raw_cache, version_matches = _load_cache_raw(cache_path)
+    cached_files: dict[str, Any] = raw_cache.get("files", {})
     cutoff = now - lookback_sec - 3600
+    ev_cutoff = now - lookback_sec
 
     all_events: list[dict[str, Any]] = []
     scanned_dbs = 0
     cache_hits = 0
+    archived_dbs = 0
+    archived_events = 0
+    cache_dirty = not version_matches and bool(cached_files)
     active_keys: set[str] = set()
 
     if conv_dir.is_dir():
@@ -480,7 +537,12 @@ def scan_conversations(
             active_keys.add(key)
             stamp = db_combined_stamp(db_path)
             entry = cached_files.get(key)
-            if isinstance(entry, dict) and entry.get("stamp") == stamp and _is_valid_cached_events(entry.get("events")):
+            if (
+                version_matches
+                and isinstance(entry, dict)
+                and entry.get("stamp") == stamp
+                and _is_valid_cached_events(entry.get("events"))
+            ):
                 evs = entry["events"]
                 cache_hits += 1
             else:
@@ -488,19 +550,50 @@ def scan_conversations(
                 cached_files[key] = {"stamp": stamp, "events": evs}
                 scanned_dbs += 1
             for e in evs:
-                if float(e.get("ts") or 0.0) >= now - lookback_sec:
+                if float(e.get("ts") or 0.0) >= ev_cutoff:
                     all_events.append(e)
 
-    # Prune old files from cache to keep it tiny
+    # Preserve events from GC'd/deleted conversation DBs while still inside the lookback window;
+    # prune only empty entries or entries whose events have fully aged past lookback_sec.
     for k in list(cached_files.keys()):
-        if k not in active_keys:
+        if k in active_keys:
+            continue
+        entry = cached_files.get(k)
+        raw_evs = entry.get("events") if isinstance(entry, dict) else None
+        surviving: list[dict[str, Any]] = []
+        if isinstance(raw_evs, list):
+            for e in raw_evs:
+                norm = _salvage_archived_event(e)
+                if norm is not None and float(norm.get("ts") or 0.0) >= ev_cutoff:
+                    surviving.append(norm)
+        if surviving:
+            was_archived = isinstance(entry, dict) and bool(entry.get("archived"))
+            prev_len = len(raw_evs) if isinstance(raw_evs, list) else -1
+            if not was_archived or prev_len != len(surviving) or not version_matches:
+                cache_dirty = True
+            cached_files[k] = {
+                "stamp": str(entry.get("stamp") or "") if isinstance(entry, dict) else "",
+                "archived": True,
+                "events": surviving,
+            }
+            all_events.extend(surviving)
+            archived_dbs += 1
+            archived_events += len(surviving)
+        else:
             del cached_files[k]
+            cache_dirty = True
 
-    if scanned_dbs > 0 or (cache_path and not cache_path.is_file()):
+    if scanned_dbs > 0 or cache_dirty or (cache_path and not cache_path.is_file()):
         save_cache(cache_path, {"version": CACHE_VERSION, "files": cached_files})
 
-    all_events.sort(key=lambda e: (e["ts"], e["step_idx"]))
-    return all_events, {"scanned_dbs": scanned_dbs, "cache_hits": cache_hits, "active_dbs": len(active_keys)}
+    all_events.sort(key=lambda e: (e["ts"], e.get("step_idx", 0)))
+    return all_events, {
+        "scanned_dbs": scanned_dbs,
+        "cache_hits": cache_hits,
+        "active_dbs": len(active_keys),
+        "archived_dbs": archived_dbs,
+        "archived_events": archived_events,
+    }
 
 
 def summarize_bucket(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1040,7 +1133,15 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
         w_start = reset_ts - WINDOW_5H_SEC
         in_win = [e for e in events if w_start - 15 <= e["ts"] <= reset_ts]
         stats = summarize_bucket(in_win)
-        is_clean = (stats["eof_rate_pct"] <= 10.0 and stats["attempts"] >= 20)
+        billable_in_win = [e for e in in_win if e["kind"] in BILLABLE_KINDS]
+        first_billable_ts = min((float(e["ts"]) for e in billable_in_win), default=0.0)
+        start_gap_sec = (
+            max(0.0, first_billable_ts - w_start)
+            if first_billable_ts > 0.0
+            else float(WINDOW_5H_SEC)
+        )
+        is_truncated = start_gap_sec > TRUNCATED_LOCK_GAP_SEC
+        is_clean = (not is_truncated and stats["eof_rate_pct"] <= 10.0 and stats["attempts"] >= 20)
         observations.append({
             "window_start": round(w_start, 3),
             "window_end": round(reset_ts, 3),
@@ -1055,10 +1156,13 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
             "tokens_raw": stats["tokens_raw"],
             "tokens_total": stats["tokens_total"],
             "est_usd": stats["est_usd"],
+            "start_gap_sec": round(start_gap_sec, 1),
+            "is_truncated": is_truncated,
             "is_clean": is_clean,
         })
 
     clean_locks = [o for o in observations if o["is_clean"]]
+    truncated_locks = [o for o in observations if o["is_truncated"]]
     noisy_locks = [o for o in observations if not o["is_clean"]]
 
     # Two-pointer O(N) scan for proven-safe 5h sliding peak:
@@ -1219,6 +1323,7 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
         "observed_lock_count": len(observations),
         "clean_lock_count": len(clean_locks),
         "noisy_lock_count": len(noisy_locks),
+        "truncated_lock_count": len(truncated_locks),
         "rpm_burst_count": rpm_burst_count,
         "latest_lock": latest,
         "lock_observations": observations[-6:],
@@ -1236,7 +1341,265 @@ def compute_calibration(events: list[dict[str, Any]], active_floor_ts: float = 0
         "avg_attempts_at_weekly_lock": round(sum(o["attempts"] for o in weekly_observations) / len(weekly_observations), 1) if weekly_observations else None,
         "avg_tokens_at_weekly_lock": int(round(sum(o["tokens_total"] for o in weekly_observations) / len(weekly_observations))) if weekly_observations else None,
         "observed_7d_safe_peak": peak_7d,
+        "persisted_safe_peak_used": False,
+        "calibration_persisted": False,
     }
+
+
+def _empty_peak_dict() -> dict[str, Any]:
+    return {
+        "lookback_days": 30,
+        "max_attempts": 0,
+        "max_attempts_at": 0.0,
+        "max_attempts_ok": 0,
+        "max_attempts_tokens_total": 0,
+        "max_ok": 0,
+        "max_ok_at": 0.0,
+        "max_ok_attempts": 0,
+        "max_ok_tokens_total": 0,
+        "max_tokens_total": 0,
+        "max_tokens_raw": 0,
+        "max_tokens_at": 0.0,
+        "max_tokens_attempts": 0,
+        "max_tokens_ok": 0,
+        "max_tokens_refs": 0,
+    }
+
+
+def _normalize_peak_dict(raw: Any) -> dict[str, Any]:
+    base = _empty_peak_dict()
+    if not isinstance(raw, dict):
+        return base
+    for k in (
+        "lookback_days", "max_attempts", "max_attempts_ok", "max_attempts_tokens_total",
+        "max_ok", "max_ok_attempts", "max_ok_tokens_total",
+        "max_tokens_total", "max_tokens_raw", "max_tokens_attempts", "max_tokens_ok", "max_tokens_refs",
+    ):
+        try:
+            base[k] = max(0, int(raw.get(k) or 0))
+        except (TypeError, ValueError):
+            pass
+    for k in ("max_attempts_at", "max_ok_at", "max_tokens_at"):
+        try:
+            base[k] = round(max(0.0, float(raw.get(k) or 0.0)), 3)
+        except (TypeError, ValueError):
+            pass
+    if base["lookback_days"] <= 0:
+        base["lookback_days"] = 30
+    return base
+
+
+def _merge_peak_dicts(live_raw: Any, saved_raw: Any, max_saved_ts: float = 0.0) -> dict[str, Any]:
+    """Monotonically keep the higher proven-safe peak across live scan and persistent ledger."""
+    live = _normalize_peak_dict(live_raw)
+    saved = _normalize_peak_dict(saved_raw)
+    out = dict(live)
+
+    def _saved_allowed(ts_val: float) -> bool:
+        if max_saved_ts <= 0.0:
+            return True
+        return ts_val > 0.0 and ts_val < max_saved_ts
+
+    if _saved_allowed(saved["max_attempts_at"]) and (
+        saved["max_attempts"] > out["max_attempts"]
+        or (
+            saved["max_attempts"] == out["max_attempts"]
+            and saved["max_attempts"] > 0
+            and saved["max_attempts_tokens_total"] > out["max_attempts_tokens_total"]
+        )
+    ):
+        out["max_attempts"] = saved["max_attempts"]
+        out["max_attempts_at"] = saved["max_attempts_at"]
+        out["max_attempts_ok"] = saved["max_attempts_ok"]
+        out["max_attempts_tokens_total"] = saved["max_attempts_tokens_total"]
+
+    if _saved_allowed(saved["max_ok_at"]) and (
+        saved["max_ok"] > out["max_ok"]
+        or (
+            saved["max_ok"] == out["max_ok"]
+            and saved["max_ok"] > 0
+            and saved["max_ok_tokens_total"] > out["max_ok_tokens_total"]
+        )
+    ):
+        out["max_ok"] = saved["max_ok"]
+        out["max_ok_at"] = saved["max_ok_at"]
+        out["max_ok_attempts"] = saved["max_ok_attempts"]
+        out["max_ok_tokens_total"] = saved["max_ok_tokens_total"]
+
+    if _saved_allowed(saved["max_tokens_at"]) and saved["max_tokens_total"] > out["max_tokens_total"]:
+        out["max_tokens_total"] = saved["max_tokens_total"]
+        out["max_tokens_raw"] = saved["max_tokens_raw"]
+        out["max_tokens_at"] = saved["max_tokens_at"]
+        out["max_tokens_attempts"] = saved["max_tokens_attempts"]
+        out["max_tokens_ok"] = saved["max_tokens_ok"]
+        out["max_tokens_refs"] = saved["max_tokens_refs"]
+
+    return out
+
+
+def _empty_calibration_ledger() -> dict[str, Any]:
+    return {
+        "version": CALIBRATION_LEDGER_VERSION,
+        "updated_at": 0.0,
+        "best_safe_peak": _empty_peak_dict(),
+        "best_7d_safe_peak": _empty_peak_dict(),
+        "lock_observations": [],
+        "weekly_lock_observations": [],
+    }
+
+
+def load_calibration_ledger(ledger_path: Path | None) -> dict[str, Any]:
+    if not ledger_path or not ledger_path.is_file():
+        return _empty_calibration_ledger()
+    try:
+        raw = json.loads(ledger_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return _empty_calibration_ledger()
+        locks_5h = [o for o in (raw.get("lock_observations") or []) if isinstance(o, dict) and float(o.get("window_end") or 0.0) > 0.0]
+        locks_7d = [o for o in (raw.get("weekly_lock_observations") or []) if isinstance(o, dict) and float(o.get("window_end") or 0.0) > 0.0]
+        return {
+            "version": CALIBRATION_LEDGER_VERSION,
+            "updated_at": float(raw.get("updated_at") or 0.0),
+            "best_safe_peak": _normalize_peak_dict(raw.get("best_safe_peak")),
+            "best_7d_safe_peak": _normalize_peak_dict(raw.get("best_7d_safe_peak")),
+            "lock_observations": locks_5h[-24:],
+            "weekly_lock_observations": locks_7d[-12:],
+        }
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return _empty_calibration_ledger()
+
+
+def save_calibration_ledger(ledger_path: Path | None, ledger: dict[str, Any]) -> None:
+    if not ledger_path:
+        return
+    save_cache(ledger_path, ledger)
+
+
+def reset_calibration_ledger(ledger_path: Path | None) -> bool:
+    if not ledger_path:
+        return False
+    try:
+        if ledger_path.exists():
+            ledger_path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _lock_obs_quality(obs: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        0 if obs.get("is_truncated") else 1,
+        int(obs.get("attempts") or 0),
+        int(obs.get("tokens_total") or 0),
+    )
+
+
+def merge_calibration_with_ledger(
+    live_cal: dict[str, Any],
+    ledger_path: Path | None,
+    active_floor_ts: float = 0.0,
+    now_ts: float = 0.0,
+) -> dict[str, Any]:
+    """Merge live 30d calibration with persistent ledger so DB GC never erases learned ceilings."""
+    if not ledger_path:
+        return live_cal
+
+    saved = load_calibration_ledger(ledger_path)
+    live_peak = _normalize_peak_dict(live_cal.get("observed_safe_peak"))
+    live_prior = _normalize_peak_dict(live_cal.get("prior_safe_peak"))
+    live_7d = _normalize_peak_dict(live_cal.get("observed_7d_safe_peak"))
+
+    merged_peak = _merge_peak_dicts(live_peak, saved["best_safe_peak"])
+    merged_prior = _merge_peak_dicts(live_prior, saved["best_safe_peak"], max_saved_ts=active_floor_ts)
+    merged_7d = _merge_peak_dicts(live_7d, saved["best_7d_safe_peak"])
+
+    persisted_used = (
+        merged_peak["max_attempts"] > live_peak["max_attempts"]
+        or merged_peak["max_ok"] > live_peak["max_ok"]
+        or merged_peak["max_tokens_total"] > live_peak["max_tokens_total"]
+    )
+
+    # Deduplicate 5h 429 observations by reset_ts minute bucket, preferring complete/richer records
+    lock_map: dict[int, dict[str, Any]] = {}
+    for src in (saved.get("lock_observations") or [], live_cal.get("lock_observations") or []):
+        for o in src:
+            if not isinstance(o, dict):
+                continue
+            we = float(o.get("window_end") or 0.0)
+            if we <= 0.0:
+                continue
+            bkey = int(round(we / 60.0)) * 60
+            prev = lock_map.get(bkey)
+            if prev is None or _lock_obs_quality(o) > _lock_obs_quality(prev):
+                lock_map[bkey] = dict(o)
+    merged_locks = sorted(lock_map.values(), key=lambda x: float(x.get("window_end") or 0.0))[-24:]
+
+    # Deduplicate 7d weekly 429 observations by 10-minute reset bucket
+    wlock_map: dict[int, dict[str, Any]] = {}
+    for src in (saved.get("weekly_lock_observations") or [], live_cal.get("weekly_lock_observations") or []):
+        for o in src:
+            if not isinstance(o, dict):
+                continue
+            we = float(o.get("window_end") or 0.0)
+            if we <= 0.0:
+                continue
+            bkey = int(round(we / 600.0)) * 600
+            prev = wlock_map.get(bkey)
+            if prev is None or (int(o.get("attempts") or 0), int(o.get("tokens_total") or 0)) > (
+                int(prev.get("attempts") or 0), int(prev.get("tokens_total") or 0)
+            ):
+                wlock_map[bkey] = dict(o)
+    merged_wlocks = sorted(wlock_map.values(), key=lambda x: float(x.get("window_end") or 0.0))[-12:]
+
+    clean_locks = [o for o in merged_locks if o.get("is_clean")]
+    truncated_locks = [o for o in merged_locks if o.get("is_truncated")]
+    noisy_locks = [o for o in merged_locks if not o.get("is_clean")]
+
+    next_ledger = {
+        "version": CALIBRATION_LEDGER_VERSION,
+        "updated_at": round(now_ts if now_ts > 0.0 else time.time(), 3),
+        "best_safe_peak": merged_peak,
+        "best_7d_safe_peak": merged_7d,
+        "lock_observations": merged_locks,
+        "weekly_lock_observations": merged_wlocks,
+    }
+    comparable_saved = {k: saved.get(k) for k in ("best_safe_peak", "best_7d_safe_peak", "lock_observations", "weekly_lock_observations")}
+    comparable_next = {k: next_ledger.get(k) for k in ("best_safe_peak", "best_7d_safe_peak", "lock_observations", "weekly_lock_observations")}
+    has_any_data = (
+        merged_peak["max_attempts"] > 0
+        or merged_7d["max_attempts"] > 0
+        or bool(merged_locks)
+        or bool(merged_wlocks)
+    )
+    if comparable_next != comparable_saved or (has_any_data and not ledger_path.is_file()):
+        save_calibration_ledger(ledger_path, next_ledger)
+
+    out = dict(live_cal)
+    out.update({
+        "observed_lock_count": len(merged_locks),
+        "clean_lock_count": len(clean_locks),
+        "noisy_lock_count": len(noisy_locks),
+        "truncated_lock_count": len(truncated_locks),
+        "latest_lock": merged_locks[-1] if merged_locks else None,
+        "lock_observations": merged_locks[-6:],
+        "avg_ok_at_lock": round(sum(o["ok"] for o in merged_locks) / len(merged_locks), 1) if merged_locks else None,
+        "avg_attempts_at_lock": round(sum(o["attempts"] for o in merged_locks) / len(merged_locks), 1) if merged_locks else None,
+        "avg_tokens_at_lock": int(round(sum(o["tokens_total"] for o in merged_locks) / len(merged_locks))) if merged_locks else None,
+        "clean_avg_ok_at_lock": round(sum(o["ok"] for o in clean_locks) / len(clean_locks), 1) if clean_locks else None,
+        "clean_avg_attempts_at_lock": round(sum(o["attempts"] for o in clean_locks) / len(clean_locks), 1) if clean_locks else None,
+        "clean_avg_tokens_at_lock": int(round(sum(o["tokens_total"] for o in clean_locks) / len(clean_locks))) if clean_locks else None,
+        "observed_safe_peak": merged_peak,
+        "prior_safe_peak": merged_prior,
+        "weekly_lock_count": len(merged_wlocks),
+        "latest_weekly_lock": merged_wlocks[-1] if merged_wlocks else None,
+        "weekly_lock_observations": merged_wlocks[-4:],
+        "avg_attempts_at_weekly_lock": round(sum(o["attempts"] for o in merged_wlocks) / len(merged_wlocks), 1) if merged_wlocks else None,
+        "avg_tokens_at_weekly_lock": int(round(sum(o["tokens_total"] for o in merged_wlocks) / len(merged_wlocks))) if merged_wlocks else None,
+        "observed_7d_safe_peak": merged_7d,
+        "persisted_safe_peak_used": persisted_used,
+        "calibration_persisted": True,
+    })
+    return out
 
 
 def scan_workspace_ledgers(workspace: str | None, now: float, max_depth: int = 6) -> list[dict[str, Any]]:
@@ -1466,7 +1829,13 @@ def compute_anchor(
         elif clean_count >= 1 and lock_upper_calls is not None and lock_upper_calls < safe_lower_calls:
             notes.append(f"历史 429 观测（{lock_upper_calls} 次）低于已证安全峰（{safe_lower_calls} 次），可能受配额变动或跨端调用影响，当前锚定实证安全上限")
         elif lock_upper_is_noisy and lock_upper_calls:
-            notes.append(f"历史上曾记录高 EOF 噪声锁（{lock_upper_calls} 次），未作为硬天花板")
+            latest_lock = calibration.get("latest_lock") or {}
+            if latest_lock.get("is_truncated"):
+                notes.append(f"最近 5h 429 窗口缺少开头时段记录（实见 {lock_upper_calls} 次，可能因旧对话清理或跨端调用），未作为硬天花板")
+            else:
+                notes.append(f"历史上曾记录高 EOF 噪声锁（{lock_upper_calls} 次），未作为硬天花板")
+        if calibration.get("persisted_safe_peak_used"):
+            notes.append("已由永久校准账本锁定历史安全峰，旧对话自动清理不会回退上限")
     else:
         source = "default_baseline"
         label = "默认基准（样本积累中）"
@@ -1573,6 +1942,7 @@ def build_report(
     anchor_mode: str = "auto",
     token_cap: int = 0,
     cache_path: Path | None = None,
+    calibration_path: Path | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     now_ts = float(now if now is not None else time.time())
@@ -1651,7 +2021,16 @@ def build_report(
     w24 = summarize_bucket(recent_24h)
     w7 = summarize_bucket(recent_7d)
     w30 = summarize_bucket(events_30d)
+    eff_cal_path = calibration_path if calibration_path is not None else (
+        cache_path.with_name("image-calibration.json") if cache_path is not None else None
+    )
     calibration = compute_calibration(events_30d, active_floor_ts=now_ts - WINDOW_5H_SEC)
+    calibration = merge_calibration_with_ledger(
+        calibration,
+        eff_cal_path,
+        active_floor_ts=now_ts - WINDOW_5H_SEC,
+        now_ts=now_ts,
+    )
     per_image_avg = compute_per_image_avg(events_30d)
     avg_wr_tok = float((per_image_avg.get("with_refs") or {}).get("avg_tokens_total") or per_image_avg.get("avg_tokens_total") or 0)
     rolling_schedule = build_rolling_schedule(
@@ -1766,9 +2145,17 @@ def main() -> None:
     parser.add_argument("--count-mode", choices=["attempts", "ok_only"], default="attempts")
     parser.add_argument("--anchor-mode", choices=["auto", "manual"], default="auto")
     parser.add_argument("--cache", default="")
+    parser.add_argument("--calibration", default="")
+    parser.add_argument("--reset-calibration", action="store_true")
     args = parser.parse_args()
 
     cache_p = Path(args.cache) if args.cache else None
+    cal_p = Path(args.calibration) if args.calibration else None
+    if args.reset_calibration:
+        target_cal = cal_p if cal_p is not None else (
+            cache_p.with_name("image-calibration.json") if cache_p is not None else None
+        )
+        reset_calibration_ledger(target_cal)
     report = build_report(
         conv_dir=Path(args.conv_dir),
         workspace=args.workspace or None,
@@ -1778,6 +2165,7 @@ def main() -> None:
         count_mode=args.count_mode,
         anchor_mode=args.anchor_mode,
         cache_path=cache_p,
+        calibration_path=cal_p,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

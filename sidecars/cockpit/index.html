@@ -433,6 +433,7 @@
     lastHdrQuotaKey: '',
     inFlight: false,
     toast: null,
+    calResetArmUntil: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1326,16 +1327,23 @@
     const hasCleanLock = (cal.clean_lock_count || 0) > 0;
     const lockMain = hasCleanLock
       ? `${cal.clean_avg_attempts_at_lock} 次 · ${fmtTok(cal.clean_avg_tokens_at_lock)}`
-      : (latestLock ? `${latestLock.attempts} 次 (${latestLock.eof_rate_pct}% EOF)` : '暂无 5h 429');
+      : (latestLock
+        ? (latestLock.is_truncated
+          ? `${latestLock.attempts} 次 (不完整窗口)`
+          : `${latestLock.attempts} 次 (${latestLock.eof_rate_pct}% EOF)`)
+        : '暂无 5h 429');
     const lockSub = hasCleanLock
       ? `基于 ${cal.clean_lock_count} 次干净锁自动校准（均值 ${cal.clean_avg_ok_at_lock} 成功）`
       : (latestLock
-        ? `仅高 EOF 噪声锁（${latestLock.ok}成/${latestLock.eof}EOF），未作硬上限`
+        ? (latestLock.is_truncated
+          ? `窗口开头缺失 ${Math.round((latestLock.start_gap_sec || 0) / 60)} 分钟（旧对话清理/跨端调用），未作硬上限`
+          : `仅高 EOF 噪声锁（${latestLock.ok}成/${latestLock.eof}EOF），未作硬上限`)
         : '近 30 天未触发 5h 配额耗尽，仅依赖安全峰值推算');
     const byRefs = avg.by_refs || [];
+    const persistedTag = cal.persisted_safe_peak_used ? ' · 永久账本保护' : '';
     const safeSub = anc.ref_tokens_source === 'calls_x_with_refs'
-      ? `实测0-429峰 ${fmtTok(anc.safe_lower_tokens || peak.max_tokens_total || 0)} · 最高成功 ${peak.max_ok || 0} 次`
-      : `最高成功 ${peak.max_ok || 0} 次${peak.max_tokens_at ? ` · 峰值 ${fmtDateTime(peak.max_tokens_at)}` : ''}`;
+      ? `实测0-429峰 ${fmtTok(anc.safe_lower_tokens || peak.max_tokens_total || 0)} · 最高成功 ${peak.max_ok || 0} 次${persistedTag}`
+      : `最高成功 ${peak.max_ok || 0} 次${peak.max_tokens_at ? ` · 峰值 ${fmtDateTime(peak.max_tokens_at)}` : ''}${persistedTag}`;
     parts.push(`<section class="card">
       <div class="ch">
         <span class="ctitle">自学习水位带 & 均图 Token</span>
@@ -1450,6 +1458,7 @@
         <div class="form-actions">
           <button type="submit" class="primary">保存设置</button>
           <button type="button" id="btn-reset-auto">恢复自动锚定</button>
+          <button type="button" id="btn-reset-cal" title="仅在更换套餐或配额下调时重置永久校准账本（双击确认）">${Date.now() < state.calResetArmUntil ? '确认重置峰值？' : '重置自学习峰值'}</button>
           <span id="save-toast" class="toast ${state.toast?.err ? 'err' : ''}">${esc(state.toast?.msg || '')}</span>
         </div>
       </form>
@@ -1471,13 +1480,14 @@
             <span>余 ${w.remaining_calls}${w.cooldown_remaining_sec > 0 ? ` · 冷却 ${cdSpan(w.cooldown_until)}` : ''}</span>
           </div>`).join('') || '<div class="sub">暂无已登记窗口</div>'}
         </div>`).join('')
-      : `<div class="sub">当前工作区未发现 <span class="mono">api_call_ledger.json</span> 账本文件（可选联动）。</div>`}
+      : `<div class="sub">当前工作区未发现可选的 <span class="mono">api_call_ledger.json</span> 账本文件。</div>`}
     </section>`);
 
     // 7. Recent events
     const evs = iq.recent_events || [];
+    const archDbs = Number(iq.scan_meta?.archived_dbs || 0);
     parts.push(`<section class="card">
-      <div class="ch"><span class="ctitle">最近生图事件 (最新 20 条)</span><span class="sub num">扫描 ${iq.scan_meta?.active_dbs ?? 0} 库</span></div>
+      <div class="ch"><span class="ctitle">最近生图事件 (最新 20 条)</span><span class="sub num">扫描 ${iq.scan_meta?.active_dbs ?? 0} 库${archDbs > 0 ? ` + ${archDbs} 归档` : ''}</span></div>
       ${evs.length ? `<ul class="list">${evs.map((e) => {
         const ti = eventTagInfo(e.kind);
         const title = e.image_name || e.prompt_preview || '(未命名图像)';
@@ -1719,6 +1729,8 @@
       iq.anchor?.status, iq.anchor?.source, iq.anchor?.ref_calls, iq.anchor?.ref_tokens,
       iq.anchor?.calls_pct, iq.anchor?.tokens_pct, iq.anchor?.used_pct_basis, iq.anchor?.remaining_calls,
       iq.anchor?.remaining_tokens, iq.anchor?.est_remaining_imgs_with_refs,
+      iq.calibration?.persisted_safe_peak_used, iq.calibration?.truncated_lock_count, iq.scan_meta?.archived_dbs,
+      Date.now() < state.calResetArmUntil,
       iq.per_image_avg?.with_refs?.avg_tokens_total,
       iq.rolling_schedule?.buckets?.length,
       iq.weekly_rolling_schedule?.total_calls, iq.weekly_rolling_schedule?.cooldown_active, iq.weekly_rolling_schedule?.buckets?.length,
@@ -1798,6 +1810,29 @@
     }
   }
 
+  async function resetCalibration() {
+    try {
+      const res = await window.sidecar.fetch('/api/calibration/reset', {
+        method: 'POST',
+        body: JSON.stringify({ workspace: state.workspace }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      if (state.dash) {
+        if (json.imageQuota) state.dash.imageQuota = json.imageQuota;
+        if (json.serverNow) state.clockOffsetSec = json.serverNow - Math.floor(Date.now() / 1000);
+        state.dash.updatedAt = new Date().toISOString();
+      }
+      state.calResetArmUntil = 0;
+      state.toast = { id: Date.now(), msg: '已重置永久校准峰值并重算', err: false };
+      render(true);
+    } catch (err) {
+      state.calResetArmUntil = 0;
+      state.toast = { id: Date.now(), msg: `重置失败：${err.message}`, err: true };
+      render(true);
+    }
+  }
+
   async function refresh(force = false) {
     if (state.inFlight && !force) return;
     state.inFlight = true;
@@ -1850,6 +1885,22 @@
     const resetBtn = e.target.closest('#btn-reset-auto');
     if (resetBtn) {
       saveSettings({ anchorMode: 'auto', softCap: 54, hardCap: 60, tokenCap: 0, countMode: 'attempts' });
+      return;
+    }
+    const resetCalBtn = e.target.closest('#btn-reset-cal');
+    if (resetCalBtn) {
+      if (Date.now() < state.calResetArmUntil) {
+        resetCalibration();
+      } else {
+        state.calResetArmUntil = Date.now() + 5000;
+        render(true);
+        setTimeout(() => {
+          if (state.calResetArmUntil && Date.now() >= state.calResetArmUntil) {
+            state.calResetArmUntil = 0;
+            render(true);
+          }
+        }, 5100);
+      }
     }
   });
 

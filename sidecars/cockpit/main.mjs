@@ -17,6 +17,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
@@ -44,6 +45,7 @@ const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.dat
 const CATALOG_PATH = join(DATA_DIR, 'model-catalog.json');
 const SETTINGS_PATH = join(DATA_DIR, 'settings.json');
 const IMAGE_CACHE_PATH = join(DATA_DIR, 'image-scan-cache.json');
+const IMAGE_CALIBRATION_PATH = join(DATA_DIR, 'image-calibration.json');
 const POOL_USAGE_CACHE_PATH = join(DATA_DIR, 'pool-usage-cache.json');
 const QUOTA_HISTORY_PATH = join(DATA_DIR, 'quota-history.json');
 
@@ -428,6 +430,7 @@ async function getImageQuotaReport(workspaceUri, force = false) {
       '--count-mode', s.countMode,
       '--anchor-mode', s.anchorMode,
       '--cache', IMAGE_CACHE_PATH,
+      '--calibration', IMAGE_CALIBRATION_PATH,
     ];
     if (workspace) args.push('--workspace', workspace);
     const out = await run(cmd, args, 30000);
@@ -486,6 +489,24 @@ app.api('/api/settings', async (data) => {
     return {
       ok: true,
       settings: currentSettings,
+      imageQuota,
+      serverNow: Math.floor(Date.now() / 1000),
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}, 'POST');
+
+app.api('/api/calibration/reset', async (data) => {
+  try {
+    if (existsSync(IMAGE_CALIBRATION_PATH)) {
+      unlinkSync(IMAGE_CALIBRATION_PATH);
+    }
+    imageQuotaCache = { key: '', fetchedAt: 0, data: null };
+    const workspace = String(data.workspace || '').trim();
+    const imageQuota = await getImageQuotaReport(workspace, true).catch((err) => ({ error: 'failed', message: err.message }));
+    return {
+      ok: true,
       imageQuota,
       serverNow: Math.floor(Date.now() / 1000),
     };

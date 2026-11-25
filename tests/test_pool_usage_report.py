@@ -145,6 +145,37 @@ class PoolUsageReportTests(unittest.TestCase):
         self.assertEqual(r2["scan_meta"]["cache_hits"], 3)
         self.assertEqual(r2["pools"]["pool_a"]["turns_7d"], 3)
 
+    def test_db_gc_preserves_7d_archived_pool_usage_and_prunes_expired(self) -> None:
+        t_day2 = int(self.now - 2 * 86400)
+        db_old = self.conv_dir / "conv-old-gc.db"
+        db_empty = self.conv_dir / "conv-empty-gc.db"
+        create_usage_db(
+            db_old,
+            [(1, 15, make_planner_md(t_day2, 24, 15_000, 60_000, 1_500))],
+            "gemini-4-neon-xhigh",
+            t_day2 + 60,
+        )
+        create_usage_db(db_empty, [], "", t_day2 + 60)
+
+        cache_file = self.root / "pool-usage-cache.json"
+        r1 = pool_usage_report.build_pool_usage_report(self.conv_dir, now=self.now, cache_path=cache_file)
+        self.assertEqual(r1["pools"]["pool_a"]["turns_7d"], 1)
+        self.assertEqual(r1["scan_meta"]["archived_dbs"], 0)
+
+        # Simulate Antigravity GC deleting both DBs
+        db_old.unlink()
+        db_empty.unlink()
+
+        r2 = pool_usage_report.build_pool_usage_report(self.conv_dir, now=self.now + 600, cache_path=cache_file)
+        self.assertEqual(r2["scan_meta"]["active_dbs"], 0)
+        self.assertEqual(r2["scan_meta"]["archived_dbs"], 1)  # empty DB pruned, non-empty archived
+        self.assertEqual(r2["pools"]["pool_a"]["turns_7d"], 1)
+
+        # Once 7 days pass, archived buckets expire and get pruned cleanly
+        r3 = pool_usage_report.build_pool_usage_report(self.conv_dir, now=self.now + 6 * 86400, cache_path=cache_file)
+        self.assertEqual(r3["scan_meta"]["archived_dbs"], 0)
+        self.assertEqual(r3["pools"]["pool_a"]["turns_7d"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,10 +7,10 @@
 ## 核心功能
 
 ### 1. 生图配额 · 5h & 7d 双时间滚轴 + 官方 Token 估算 + 自学习水位带
-- **增量只读扫描**：以只读模式（`?mode=ro`）扫描近 30 天 `~/.gemini/antigravity/conversations/*.db` 中的 `generate_image` 记录，配合 `mtime + size` 缓存（v5 校验与原子写入），热刷新约 100ms，自动剥离突发每分钟限流（`429_RPM`）、跨日周池限流（`429_WEEKLY`）与本地参数错误（`CLIENT_ERR`）。
+- **增量只读扫描与旧库归档保护**：以只读模式（`?mode=ro`）扫描近 30 天 `~/.gemini/antigravity/conversations/*.db` 中的 `generate_image` 记录，配合 `mtime + size` 缓存（v6 校验、旧库归档保留与原子写入），热刷新约 100ms，自动剥离突发每分钟限流（`429_RPM`）、跨日周池限流（`429_WEEKLY`）与本地参数错误（`CLIENT_ERR`）；即使 Antigravity 自动清理超过约 500 个的旧对话 `.db` 文件，缓存仍会按窗口保留归档事件。
 - **5h + 7d 双连续时间滚轴回血**：5h 窗口严格按 `[now - 5h, now]` 滑动窗口追踪实时占用，按自然 30 分钟刻度绘制分段回血时间表（`30m / 1h / 2h` 快捷预测）；**7 天周滚轴**按自然日汇总未来 7 天每日滚出释放量（`24h / 48h / 72h` 释放预测、30 天无周锁安全周峰及周池 429 独立识别，避免污染 5h 上限校准）。
 - **官方 `gemini-3.1-flash-image` Token 计量与带垫图均图预估**：依据官方 1K 出图计量（Prompt 估算 + 参考图 `1,120 tok/张` + 1K 出图 `1,120 tok/张` + 最小内部思考 `~250 tok/次`）计算每次与每窗口 Token 及 API 等效美元开销，独立统计 **带垫图（`≥1` 张参考图）均图 Token** 与 `0 / 1 / 2 / 3+` 参考图分档画像，自动换算当前预估剩余可出图张数及 `30m / 1h / 2h` 回血等效张数。
-- **双维透明进度条与自学习水位带**：在后端未公开生图桶总额的前提下，自动吸收近 30 天 **已证实 0-429 安全峰值** 与 **实测 5h 429 锁定观测（自动过滤高 EOF 噪声锁）**，同时展示 Token 与次数双进度条及瓶颈维度，并支持切换为手动阈值模式（自定义软/硬次数上限或 Token 上限）。
+- **双维透明进度条与永久自学习水位带**：在后端未公开生图桶总额的前提下，自动吸收近 30 天 **已证实 0-429 安全峰值** 与 **实测 5h 429 锁定观测（自动过滤高 EOF 噪声锁及开头缺失的截断锁）**，并通过永久校准账本（`image-calibration.json`）单调保护历史峰值不因旧对话清理或 30 天滚出而回退（设置区支持按需手动重置）；同时展示 Token 与次数双进度条及瓶颈维度，也支持切换为手动阈值模式（自定义软/硬次数上限或 Token 上限）。
 - **429 官方冷却倒计时与可选账本联动**：自动解析 429 响应中的 `quotaResetTimeStamp` 与底层模型名，精准区分 5h 冷却与跨日周池冷却并倒计时；若锁定后已出现新成功出图则自动解除冷却态；工作区存在 `api_call_ledger.json` 时自动汇总展示。
 
 ### 2. 当前模型配额池 · 双池 × 双窗口实时监控 + 7 天周回血预测
@@ -60,7 +60,7 @@ cd ~/.gemini/config/plugins/quota-cockpit && git pull
 
 - **运行方式**：原生 Antigravity Sidecar Web UI（`SIDECAR_UI_ENTRYPOINT_AUX_PANE`），本地回环服务仅在本机运行。
 - **严格只读与零 Token 消耗**：只以只读方式读取本地对话 SQLite、可选工作区账本与官方本地 RPC；**不上传任何数据、不调用外部网络 API、不消耗任何模型 Token、不修改原始对话数据库**。
-- **配置与缓存位置**：用户自定义阈值、增量扫描缓存与 8 天配额变动快照保存在 Antigravity 分配的 Sidecar 数据目录（`ANTIGRAVITY_EXECUTABLE_DATA_DIR`）下的 `settings.json`、`image-scan-cache.json`、`pool-usage-cache.json` 与 `quota-history.json`。
+- **配置与缓存位置**：用户自定义阈值、增量扫描归档缓存、永久生图校准账本与 8 天配额变动快照保存在 Antigravity 分配的 Sidecar 数据目录（`ANTIGRAVITY_EXECUTABLE_DATA_DIR`）下的 `settings.json`、`image-scan-cache.json`、`image-calibration.json`、`pool-usage-cache.json` 与 `quota-history.json`。
 
 ## 目录结构
 

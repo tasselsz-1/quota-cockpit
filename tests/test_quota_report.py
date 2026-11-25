@@ -704,6 +704,87 @@ class QuotaReportTests(unittest.TestCase):
         self.assertFalse(rep2["weekly_rolling_schedule"]["cooldown_active"])
         self.assertAlmostEqual(rep2["weekly_rolling_schedule"]["next_recover_ts"], t_d1 + quota_report.WINDOW_7D_SEC, delta=2.0)
 
+    def test_db_gc_preserves_archived_events_and_persistent_calibration_ledger(self) -> None:
+        # Day -2: 100-image 5h burst (proven safe peak = 100) + an empty DB with 0 image calls
+        t_peak = int(self.now - 2 * 86400)
+        rows_100 = [
+            (i + 1, 91, 3, make_metadata(t_peak + i * 60, args={"ImageName": f"p_{i}", "ImagePaths": ["/r.png"]}), None)
+            for i in range(100)
+        ]
+        db_100 = self.conv_dir / "conv-100.db"
+        db_empty = self.conv_dir / "conv-empty.db"
+        create_conv_db(db_100, rows_100, t_peak + 7000)
+        create_conv_db(db_empty, [(1, 132, 3, make_metadata(t_peak + 10, tool_name="read_file"), None)], t_peak + 100)
+
+        cache_file = self.root / "image-scan-cache.json"
+        cal_file = self.root / "image-calibration.json"
+
+        rep1 = quota_report.build_report(self.conv_dir, cache_path=cache_file, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep1["anchor"]["ref_calls"], 100)
+        self.assertEqual(rep1["window_7d"]["attempts"], 100)
+        self.assertEqual(rep1["calibration"]["observed_safe_peak"]["max_attempts"], 100)
+        self.assertEqual(rep1["calibration"]["observed_7d_safe_peak"]["max_attempts"], 100)
+        self.assertTrue(cal_file.is_file())
+
+        # Simulate Antigravity GC deleting older DBs, leaving only a smaller 59-image burst
+        db_100.unlink()
+        db_empty.unlink()
+        t_small = int(self.now - 7 * 3600)
+        rows_59 = [
+            (i + 1, 91, 3, make_metadata(t_small + i * 60, args={"ImageName": f"s_{i}", "ImagePaths": ["/r.png"]}), None)
+            for i in range(59)
+        ]
+        create_conv_db(self.conv_dir / "conv-59.db", rows_59, t_small + 4000)
+
+        rep2 = quota_report.build_report(self.conv_dir, cache_path=cache_file, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep2["scan_meta"]["active_dbs"], 1)
+        self.assertEqual(rep2["scan_meta"]["archived_dbs"], 1)  # empty DB pruned, 100-img DB archived
+        self.assertEqual(rep2["scan_meta"]["archived_events"], 100)
+        self.assertEqual(rep2["window_7d"]["attempts"], 159)
+        self.assertEqual(rep2["anchor"]["ref_calls"], 100)
+
+        # Even if cache is cleared / 30d rolls past, persistent calibration ledger STILL preserves 100-image peak
+        fresh_cache = self.root / "image-scan-cache-fresh.json"
+        rep3 = quota_report.build_report(self.conv_dir, cache_path=fresh_cache, calibration_path=cal_file, now=self.now)
+        self.assertEqual(rep3["scan_meta"]["archived_dbs"], 0)
+        self.assertTrue(rep3["calibration"]["persisted_safe_peak_used"])
+        self.assertEqual(rep3["anchor"]["ref_calls"], 100)
+        self.assertEqual(rep3["anchor"]["prior_safe_calls"], 100)
+
+        # Explicit calibration reset clears persisted peak and recalculates from surviving DBs (59)
+        self.assertTrue(quota_report.reset_calibration_ledger(cal_file))
+        rep4 = quota_report.build_report(self.conv_dir, cache_path=fresh_cache, calibration_path=cal_file, now=self.now)
+        self.assertFalse(rep4["calibration"]["persisted_safe_peak_used"])
+        self.assertEqual(rep4["anchor"]["ref_calls"], 59)
+
+    def test_truncated_429_lock_window_not_marked_clean(self) -> None:
+        # Simulate a 429 lock whose first 30 minutes were lost to DB GC (w_start = reset - 5h, first event = w_start + 1800s)
+        reset_ts = self.now - 3600
+        w_start = reset_ts - quota_report.WINDOW_5H_SEC
+        first_ts = int(w_start + 1800)  # 30-min gap > 15-min TRUNCATED_LOCK_GAP_SEC
+        rows = [
+            (i + 1, 91, 3, make_metadata(first_ts + i * 60, args={"ImageName": f"t_{i}"}), None)
+            for i in range(42)
+        ]
+        err_429 = json.dumps({
+            "error": {
+                "code": 429,
+                "message": "QUOTA_EXHAUSTED",
+                "details": [{"metadata": {"model": "gemini-3.1-flash-image", "quotaResetTimeStamp": iso_utc(reset_ts)}}],
+            }
+        })
+        rows.append((50, 91, 4, make_metadata(first_ts + 42 * 60, end_ts=first_ts + 42 * 60 + 2), make_error_details(err_429)))
+        create_conv_db(self.conv_dir / "conv-trunc.db", rows, self.now - 10)
+
+        rep = quota_report.build_report(self.conv_dir, now=self.now)
+        cal = rep["calibration"]
+        self.assertEqual(cal["observed_lock_count"], 1)
+        self.assertEqual(cal["clean_lock_count"], 0)
+        self.assertEqual(cal["truncated_lock_count"], 1)
+        self.assertTrue(cal["latest_lock"]["is_truncated"])
+        self.assertFalse(cal["latest_lock"]["is_clean"])
+        self.assertNotEqual(rep["anchor"]["source"], "calibrated_429")
+
     def test_context_report_import_sanity(self) -> None:
         self.assertTrue(callable(context_report.load))
         self.assertTrue(callable(context_report.collect_stats))

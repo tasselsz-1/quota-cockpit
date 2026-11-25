@@ -251,7 +251,42 @@ def build_pool_usage_report(
     turns_5h: dict[str, int] = {"pool_a": 0, "pool_b": 0}
     scanned_dbs = 0
     cache_hits = 0
+    archived_dbs = 0
+    cache_dirty = False
     active_keys: set[str] = set()
+
+    def _absorb_buckets(db_buckets: list[dict[str, Any]]) -> None:
+        for b in db_buckets:
+            if float(b["last_ts"]) < cutoff_7d:
+                continue
+            pk = str(b["pool"])
+            h_ts = int(b["hour_ts"])
+            pool_map = merged.setdefault(pk, {})
+            cur = pool_map.get(h_ts)
+            if cur is None:
+                pool_map[h_ts] = {
+                    "hour_ts": h_ts,
+                    "first_ts": float(b["first_ts"]),
+                    "last_ts": float(b["last_ts"]),
+                    "turns": int(b["turns"]),
+                    "uncached_in": int(b.get("uncached_in") or 0),
+                    "cache_read": int(b.get("cache_read") or 0),
+                    "out": int(b.get("out") or 0),
+                    "weighted": float(b["weighted"]),
+                }
+            else:
+                if float(b["first_ts"]) < cur["first_ts"]:
+                    cur["first_ts"] = float(b["first_ts"])
+                if float(b["last_ts"]) > cur["last_ts"]:
+                    cur["last_ts"] = float(b["last_ts"])
+                cur["turns"] += int(b["turns"])
+                cur["uncached_in"] += int(b.get("uncached_in") or 0)
+                cur["cache_read"] += int(b.get("cache_read") or 0)
+                cur["out"] += int(b.get("out") or 0)
+                cur["weighted"] += float(b["weighted"])
+
+            if float(b["last_ts"]) >= cutoff_5h:
+                turns_5h[pk] = turns_5h.get(pk, 0) + int(b["turns"])
 
     if conv_dir.is_dir():
         for db_path in conv_dir.glob("*.db"):
@@ -269,44 +304,35 @@ def build_pool_usage_report(
                 db_buckets = scan_single_db_usage(db_path)
                 cached_files[key] = {"stamp": stamp, "buckets": db_buckets}
                 scanned_dbs += 1
+            _absorb_buckets(db_buckets)
 
-            for b in db_buckets:
-                if float(b["last_ts"]) < cutoff_7d:
-                    continue
-                pk = str(b["pool"])
-                h_ts = int(b["hour_ts"])
-                pool_map = merged.setdefault(pk, {})
-                cur = pool_map.get(h_ts)
-                if cur is None:
-                    pool_map[h_ts] = {
-                        "hour_ts": h_ts,
-                        "first_ts": float(b["first_ts"]),
-                        "last_ts": float(b["last_ts"]),
-                        "turns": int(b["turns"]),
-                        "uncached_in": int(b.get("uncached_in") or 0),
-                        "cache_read": int(b.get("cache_read") or 0),
-                        "out": int(b.get("out") or 0),
-                        "weighted": float(b["weighted"]),
-                    }
-                else:
-                    if float(b["first_ts"]) < cur["first_ts"]:
-                        cur["first_ts"] = float(b["first_ts"])
-                    if float(b["last_ts"]) > cur["last_ts"]:
-                        cur["last_ts"] = float(b["last_ts"])
-                    cur["turns"] += int(b["turns"])
-                    cur["uncached_in"] += int(b.get("uncached_in") or 0)
-                    cur["cache_read"] += int(b.get("cache_read") or 0)
-                    cur["out"] += int(b.get("out") or 0)
-                    cur["weighted"] += float(b["weighted"])
-
-                if float(b["last_ts"]) >= cutoff_5h:
-                    turns_5h[pk] = turns_5h.get(pk, 0) + int(b["turns"])
-
+    # Retain 7-day buckets from DBs that Antigravity has already GC'd; prune only empty/expired entries
     for k in list(cached_files.keys()):
-        if k not in active_keys:
+        if k in active_keys:
+            continue
+        entry = cached_files.get(k)
+        raw_buckets = entry.get("buckets") if isinstance(entry, dict) else None
+        surviving = (
+            [b for b in raw_buckets if float(b["last_ts"]) >= cutoff_7d]
+            if _is_valid_cached_buckets(raw_buckets)
+            else []
+        )
+        if surviving:
+            was_archived = isinstance(entry, dict) and bool(entry.get("archived"))
+            if not was_archived or len(surviving) != len(raw_buckets or []):
+                cache_dirty = True
+            cached_files[k] = {
+                "stamp": str(entry.get("stamp") or "") if isinstance(entry, dict) else "",
+                "archived": True,
+                "buckets": surviving,
+            }
+            _absorb_buckets(surviving)
+            archived_dbs += 1
+        else:
             del cached_files[k]
+            cache_dirty = True
 
-    if scanned_dbs > 0 or (cache_path and not cache_path.is_file()):
+    if scanned_dbs > 0 or cache_dirty or (cache_path and not cache_path.is_file()):
         save_cache(cache_path, {"version": CACHE_VERSION, "files": cached_files})
 
     pools_out: dict[str, Any] = {}
@@ -335,6 +361,7 @@ def build_pool_usage_report(
             "scanned_dbs": scanned_dbs,
             "cache_hits": cache_hits,
             "active_dbs": len(active_keys),
+            "archived_dbs": archived_dbs,
         },
         "pools": pools_out,
     }
