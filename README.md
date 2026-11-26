@@ -1,8 +1,8 @@
 # 配额与上下文 (`quota-cockpit`)
 
-> Antigravity 2.0 侧边栏三合一实时监控插件（Sidecar AUX Pane）——零模型 Token 消耗、零外部 npm 依赖、严格只读本地数据。
+> Antigravity 2.0 侧边栏四合一实时监控插件（Sidecar AUX Pane）——零模型 Token 消耗、零外部 npm 依赖、严格只读本地数据。
 >
-> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5h & 7d Rolling Image Generation Quota**, **Dual Model Quota Pools (5h + Weekly Rolling Recovery Forecast)**, and **Exact Conversation Context & Prompt Cache Hit Analytics** in one dashboard.
+> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5h & 7d Rolling Image Generation Quota**, **Google Flow Video Quota & Anti-Throttle Monitor**, **Dual Model Quota Pools (5h + Weekly Rolling Recovery Forecast)**, and **Exact Conversation Context & Prompt Cache Hit Analytics** in one dashboard.
 
 ## 核心功能
 
@@ -13,13 +13,19 @@
 - **双维透明进度条、峰值固定与永久自学习水位带**：在后端未公开生图桶总额的前提下，自动吸收近 30 天 **已证实 0-429 安全峰值** 与 **实测 5h 429 锁定观测（自动过滤高 EOF 噪声锁及开头缺失的截断锁）**，并通过永久校准账本（`image-calibration.json`）单调保护历史峰值；**支持在面板一键固定 5h 峰值张数**（输入自定义峰值或锁定实测峰，永久生效不受旧对话清理或时间滚出影响，同时继续按带垫图均图 Token 实时折算剩余张数，随时可修改或取消固定）；同时展示 Token 与次数双进度条及瓶颈维度，也支持切换为手动阈值模式。
 - **429 官方冷却倒计时与可选账本联动**：自动解析 429 响应中的 `quotaResetTimeStamp` 与底层模型名，精准区分 5h 冷却与跨日周池冷却并倒计时；若锁定后已出现新成功出图则自动解除冷却态；工作区存在 `api_call_ledger.json` 时自动汇总展示。
 
-### 2. 当前模型配额池 · 双池 × 双窗口实时监控 + 7 天周回血预测
+### 2. Google Flow 生视频配额 · 账号积分 + 模型可生估算 + 1h/24h 防风控滚轴
+- **毫秒级纯本地零风控监控（`flow_report.py`）**：日常刷新严格只读本地 `gflow-cli` SQLite 数据库（`gflow.db?mode=ro`）与可选防限流账本（`~/.gemini/gflow_traffic_ledger.json`），零网络请求、零浏览器启动、零 Profile 锁争抢；未安装 `gflow-cli` 时优雅降级。
+- **手动按需同步真实积分 + 同步后自动扣减**：因代理环境下 `gflow credits` 会回退浏览器读取，为防止后台高频轮询触发风控，真实余额采用一键手动同步（`POST /api/flow/sync-credits`，自动检测活跃 Profile 锁避让冲突并落盘 `flow-credits-cache.json`）；两次同步之间依据本地账本自动扣除新增积分，实时估算当前余额与净可用预算（默认扣除 `100` 积分安全底线）。
+- **主力视频模型可生段数与退役隔离**：按净可用积分换算 `Veo 3.1 Lite`（~10 积分）、`Omni Flash 1.2`（~20 积分）、`Veo 3.1 Lite LP`（~10 积分）剩余可生成段数（标注 `1080p` 超分免费），并将 `2026-12-05` 即将退役模型隔离折叠。
+- **1h / 24h 防限流滚轴回血与熔断警示**：实时监控 1h 频次、24h 频次、24h 积分预算、最小间隔冷却（支持在面板自定义阈值）及滚轴释放倒计时；命中 WAF 人工熔断或 429 定时冷却时总览与详情页高亮提醒；无全局账本时自动降级由 `gflow.db` 驱动，同时支持联动工作区可选的 `flow_run_state.json`。
+
+### 3. 当前模型配额池 · 双池 × 双窗口实时监控 + 7 天周回血预测
 - 并行调用 Antigravity 本地 Language Server 的 `RetrieveUserQuotaSummary` 与 `GetAvailableModels` RPC，实时展示 **池 A（Google Gemini）** 与 **池 B（Claude / 第三方）** 各自的 **5 小时额度（5h）** 与 **周额度（weekly）** 剩余百分比、参考锚点与每秒倒计时（满额未消耗时明确标注 `满额`）。
 - **双源融合周回血追踪**：后台自动将官方 `remainingFraction` 变动写入轻量 8 天环形快照账本（`quota-history.json`），绕过黑盒模型权重记录真实掉血轨迹与实时回血速率（`%/h` 与预计回满时长）；冷启动期自动通过本地 7 天对话库加权消耗（`pool_usage_report.py`）锚定官方当前 `usedPct`，平移 `+7 天` 生成未来 7 天按日预计回血比例与恢复后余量曲线，攒满快照后自动过渡为官方实测轨迹。
 - 顶栏常驻当前对话模型的 `5h + 周额度` 速览条；自动高亮当前对话所在配额池，并按双窗口瓶颈 `min(5h, weekly)` 在低于 20% 且对侧池充裕时给出跨池切换建议。
 - 标注模型梯队与角色（`T0`–`T4`、`IMG`），并提示生图模型虽在接口中归属池 A，但实际调用命中后端独立 5h 生图桶。
 
-### 3. 当前对话上下文与 Prompt 缓存命中 · Exact `/context` 明细
+### 4. 当前对话上下文与 Prompt 缓存命中 · Exact `/context` 明细
 - 解析原生对话 protobuf，实时显示 `used / limit tokens`、单次请求预算预警、100 点占用网格、分类占比（用户 / 模型 / 工具 / 系统 / Rules / Skills / MCP）、Checkpoints 及已加载的 Knowledge / Artifact / Skill / System 文件列表。
 - **Prompt 缓存命中监控**：直接解析本地对话库逐轮 `model_usage`（`cache_read_tokens` 与 `uncached_input_tokens`），在总览与上下文详情页实时展示最新一轮缓存命中率、上轮前缀复用率、当前 `/compact` 压缩段与整场累计命中率、真实缓存失效重建次数（自动区分冷启/新增大文件与真超时失效）、距上轮请求时长（含冷却提示）及近 16 轮命中率迷你轨迹图。
 - 支持一键复制纯文本报告（含 Prompt 缓存摘要），便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
@@ -59,8 +65,8 @@ cd ~/.gemini/config/plugins/quota-cockpit && git pull
 ## 架构与隐私说明
 
 - **运行方式**：原生 Antigravity Sidecar Web UI（`SIDECAR_UI_ENTRYPOINT_AUX_PANE`），本地回环服务仅在本机运行。
-- **严格只读与零 Token 消耗**：只以只读方式读取本地对话 SQLite、可选工作区账本与官方本地 RPC；**不上传任何数据、不调用外部网络 API、不消耗任何模型 Token、不修改原始对话数据库**。
-- **配置与缓存位置**：用户自定义阈值、增量扫描归档缓存、永久生图校准账本与 8 天配额变动快照保存在 Antigravity 分配的 Sidecar 数据目录（`ANTIGRAVITY_EXECUTABLE_DATA_DIR`）下的 `settings.json`、`image-scan-cache.json`、`image-calibration.json`、`pool-usage-cache.json` 与 `quota-history.json`。
+- **严格只读与零 Token 消耗**：只以只读方式读取本地对话 SQLite、本地 `gflow.db`、可选工作区账本与官方本地 RPC（Google Flow 真实积分仅在用户点击同步按钮时按需只读查询）；**不上传任何数据、不消耗任何模型 Token 或视频积分、不修改原始对话数据库**。
+- **配置与缓存位置**：用户自定义阈值、增量扫描归档缓存、永久生图校准账本、Flow 积分缓存与 8 天配额变动快照保存在 Antigravity 分配的 Sidecar 数据目录（`ANTIGRAVITY_EXECUTABLE_DATA_DIR`）下的 `settings.json`、`image-scan-cache.json`、`image-calibration.json`、`flow-credits-cache.json`、`pool-usage-cache.json` 与 `quota-history.json`。
 
 ## 目录结构
 
@@ -79,11 +85,13 @@ quota-cockpit/
 │   ├── pools_logic.mjs          # 双池 × 双窗口归并与双源周回血引擎
 │   ├── index.html               # 侧边栏 Web UI（零构建依赖）
 │   ├── quota_report.py          # 5h/7d 生图配额 / Token / 水位带分析器
+│   ├── flow_report.py           # Google Flow 生视频积分与防限流分析器
 │   ├── pool_usage_report.py     # 本地 7 天分池对话消耗增量扫描器
 │   └── context_report.py        # 对话 protobuf 上下文与缓存命中解析器
 └── tests/
     ├── test_pools.mjs           # Node.js 双池与周回血单元测试
     ├── test_quota_report.py     # 生图配额 5h/7d Python 单元测试
+    ├── test_flow_report.py      # Google Flow 配额与防限流 Python 单元测试
     ├── test_pool_usage_report.py# 分池对话消耗扫描 Python 单元测试
     └── test_context_report.py   # 上下文与 Prompt 缓存 Python 单元测试
 ```

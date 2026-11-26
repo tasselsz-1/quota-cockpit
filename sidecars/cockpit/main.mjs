@@ -1,13 +1,16 @@
 // Sidecar backend for the Antigravity Quota & Context Cockpit panel.
 //
-// Combines three real-time views in a single zero-token AUX pane:
+// Combines four real-time views in a single zero-token AUX pane:
 // 1. Image Generation Quota (`quota_report.py`): 5h rolling/429-locked window,
 //    24h/7d stats, EOF tracking, empirical 429 ceiling calibration, and
 //    optional workspace `api_call_ledger.json` linking.
-// 2. Live Dual Quota Pools (`GetAvailableModels` + `RetrieveUserQuotaSummary` RPCs):
+// 2. Google Flow Video Quota (`flow_report.py`): local zero-network rolling
+//    1h/24h traffic caps, daily credit budget, circuit breaker alerts, model
+//    segment estimates, gflow.db 30d history, and on-demand manual credit sync.
+// 3. Live Dual Quota Pools (`GetAvailableModels` + `RetrieveUserQuotaSummary` RPCs):
 //    Pool A (Google Gemini) vs Pool B (Claude / OpenAI) 5-hour & weekly remaining %,
 //    reset times, active model pool highlighting, and cross-pool routing advice.
-// 3. Current Conversation Context (`context_report.py`): exact protobuf token
+// 4. Current Conversation Context (`context_report.py`): exact protobuf token
 //    breakdown, 100-dot grid, checkpoints, and loaded files.
 
 import { execFile } from 'node:child_process';
@@ -39,6 +42,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_SCRIPT = join(HERE, 'context_report.py');
 const QUOTA_SCRIPT = join(HERE, 'quota_report.py');
 const POOL_USAGE_SCRIPT = join(HERE, 'pool_usage_report.py');
+const FLOW_SCRIPT = join(HERE, 'flow_report.py');
 const GEMINI_DIR = process.env.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini');
 const CONVERSATIONS = join(GEMINI_DIR, 'antigravity', 'conversations');
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
@@ -48,11 +52,14 @@ const IMAGE_CACHE_PATH = join(DATA_DIR, 'image-scan-cache.json');
 const IMAGE_CALIBRATION_PATH = join(DATA_DIR, 'image-calibration.json');
 const POOL_USAGE_CACHE_PATH = join(DATA_DIR, 'pool-usage-cache.json');
 const QUOTA_HISTORY_PATH = join(DATA_DIR, 'quota-history.json');
+const FLOW_CREDITS_CACHE_PATH = join(DATA_DIR, 'flow-credits-cache.json');
+const FLOW_LEDGER_PATH = process.env.GFLOW_TRAFFIC_LEDGER || join(GEMINI_DIR, 'gflow_traffic_ledger.json');
 
 const POOLS_TTL_MS = 30 * 1000;
 const POOLS_RETRY_MS = 5 * 1000;
 const POOL_USAGE_TTL_MS = 30 * 1000;
 const IMAGE_TTL_MS = 12 * 1000;
+const FLOW_TTL_MS = 10 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const DEFAULT_SETTINGS = {
@@ -61,6 +68,11 @@ const DEFAULT_SETTINGS = {
   tokenCap: 0,
   countMode: 'attempts',
   anchorMode: 'auto',
+  flowMaxPerHour: 6,
+  flowMaxPerDay: 20,
+  flowMaxDailyCredits: 400,
+  flowMinCredits: 100,
+  flowMinGapSec: 35,
 };
 
 const app = new SidecarApp();
@@ -113,16 +125,63 @@ function clampInt(val, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
-function normalizeSettings(raw) {
+function normalizeSettings(raw, base = DEFAULT_SETTINGS) {
+  const b = base && typeof base === 'object' ? base : DEFAULT_SETTINGS;
   const obj = raw && typeof raw === 'object' ? raw : {};
-  const softCap = clampInt(obj.softCap ?? obj.soft_cap, 1, 2000, DEFAULT_SETTINGS.softCap);
-  const hardCap = clampInt(obj.hardCap ?? obj.hard_cap, softCap, 2000, Math.max(softCap, DEFAULT_SETTINGS.hardCap));
-  const tokenCap = clampInt(obj.tokenCap ?? obj.token_cap, 0, 50_000_000, DEFAULT_SETTINGS.tokenCap);
-  const modeRaw = String(obj.countMode ?? obj.count_mode ?? DEFAULT_SETTINGS.countMode).trim();
+  const softCap = clampInt(obj.softCap ?? obj.soft_cap, 1, 2000, b.softCap ?? DEFAULT_SETTINGS.softCap);
+  const hardCap = clampInt(
+    obj.hardCap ?? obj.hard_cap,
+    softCap,
+    2000,
+    Math.max(softCap, b.hardCap ?? DEFAULT_SETTINGS.hardCap),
+  );
+  const tokenCap = clampInt(obj.tokenCap ?? obj.token_cap, 0, 50_000_000, b.tokenCap ?? DEFAULT_SETTINGS.tokenCap);
+  const modeRaw = String(obj.countMode ?? obj.count_mode ?? b.countMode ?? DEFAULT_SETTINGS.countMode).trim();
   const countMode = modeRaw === 'ok_only' ? 'ok_only' : 'attempts';
-  const anchorRaw = String(obj.anchorMode ?? obj.anchor_mode ?? DEFAULT_SETTINGS.anchorMode).trim();
+  const anchorRaw = String(obj.anchorMode ?? obj.anchor_mode ?? b.anchorMode ?? DEFAULT_SETTINGS.anchorMode).trim();
   const anchorMode = anchorRaw === 'manual' ? 'manual' : 'auto';
-  return { softCap, hardCap, tokenCap, countMode, anchorMode };
+  const flowMaxPerHour = clampInt(
+    obj.flowMaxPerHour ?? obj.flow_max_per_hour,
+    1,
+    200,
+    b.flowMaxPerHour ?? DEFAULT_SETTINGS.flowMaxPerHour,
+  );
+  const flowMaxPerDay = clampInt(
+    obj.flowMaxPerDay ?? obj.flow_max_per_day,
+    flowMaxPerHour,
+    1000,
+    Math.max(flowMaxPerHour, b.flowMaxPerDay ?? DEFAULT_SETTINGS.flowMaxPerDay),
+  );
+  const flowMaxDailyCredits = clampInt(
+    obj.flowMaxDailyCredits ?? obj.flow_max_daily_credits,
+    10,
+    50000,
+    b.flowMaxDailyCredits ?? DEFAULT_SETTINGS.flowMaxDailyCredits,
+  );
+  const flowMinCredits = clampInt(
+    obj.flowMinCredits ?? obj.flow_min_credits,
+    0,
+    10000,
+    b.flowMinCredits ?? DEFAULT_SETTINGS.flowMinCredits,
+  );
+  const flowMinGapSec = clampInt(
+    obj.flowMinGapSec ?? obj.flow_min_gap_sec,
+    0,
+    600,
+    b.flowMinGapSec ?? DEFAULT_SETTINGS.flowMinGapSec,
+  );
+  return {
+    softCap,
+    hardCap,
+    tokenCap,
+    countMode,
+    anchorMode,
+    flowMaxPerHour,
+    flowMaxPerDay,
+    flowMaxDailyCredits,
+    flowMinCredits,
+    flowMinGapSec,
+  };
 }
 
 function loadSettings() {
@@ -136,8 +195,8 @@ function loadSettings() {
   return { ...DEFAULT_SETTINGS };
 }
 
-function saveSettings(next) {
-  const clean = normalizeSettings(next);
+function saveSettings(next, base = currentSettings) {
+  const clean = normalizeSettings(next, base);
   mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${SETTINGS_PATH}.tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(clean, null, 2), 'utf8');
@@ -453,6 +512,94 @@ async function getImageQuotaReport(workspaceUri, force = false, extraArgs = []) 
   }
 }
 
+// --- Google Flow video quota report -------------------------------------------
+
+let flowQuotaCache = { key: '', fetchedAt: 0, data: null };
+let flowQuotaInFlight = null;
+let flowSyncInFlight = null;
+
+function buildFlowScriptArgs(pre, workspace, extraArgs = []) {
+  const s = currentSettings;
+  const args = [
+    ...pre,
+    FLOW_SCRIPT,
+    '--ledger', FLOW_LEDGER_PATH,
+    '--credits-cache', FLOW_CREDITS_CACHE_PATH,
+    '--max-per-hour', String(s.flowMaxPerHour),
+    '--max-per-day', String(s.flowMaxPerDay),
+    '--max-daily-credits', String(s.flowMaxDailyCredits),
+    '--min-remaining-credits', String(s.flowMinCredits),
+    '--min-gap-sec', String(s.flowMinGapSec),
+    ...extraArgs,
+  ];
+  if (workspace) args.push('--workspace', workspace);
+  return args;
+}
+
+function flowCacheKey(workspace) {
+  const s = currentSettings;
+  return `${workspace}|${s.flowMaxPerHour}|${s.flowMaxPerDay}|${s.flowMaxDailyCredits}|${s.flowMinCredits}|${s.flowMinGapSec}`;
+}
+
+async function getFlowQuotaReport(workspaceUri, force = false) {
+  const workspace = workspacePath(workspaceUri);
+  const key = flowCacheKey(workspace);
+  const now = Date.now();
+
+  if (!force && flowQuotaCache.data && flowQuotaCache.key === key && (now - flowQuotaCache.fetchedAt) < FLOW_TTL_MS) {
+    return flowQuotaCache.data;
+  }
+  if (!force && flowQuotaInFlight && flowQuotaInFlight.key === key) {
+    return flowQuotaInFlight.promise;
+  }
+
+  const promise = (async () => {
+    mkdirSync(DATA_DIR, { recursive: true });
+    const { cmd, pre } = await findPython();
+    const args = buildFlowScriptArgs(pre, workspace);
+    const out = await run(cmd, args, 15000);
+    const parsed = JSON.parse(out);
+    flowQuotaCache = { key, fetchedAt: Date.now(), data: parsed };
+    return parsed;
+  })();
+
+  flowQuotaInFlight = { key, promise };
+  try {
+    return await promise;
+  } finally {
+    if (flowQuotaInFlight && flowQuotaInFlight.promise === promise) {
+      flowQuotaInFlight = null;
+    }
+  }
+}
+
+async function syncFlowCredits(workspaceUri, forceIgnoreBusy = false) {
+  if (flowSyncInFlight) return flowSyncInFlight;
+  const workspace = workspacePath(workspaceUri);
+  const key = flowCacheKey(workspace);
+
+  const promise = (async () => {
+    mkdirSync(DATA_DIR, { recursive: true });
+    const { cmd, pre } = await findPython();
+    const extra = ['--sync-credits'];
+    if (forceIgnoreBusy) extra.push('--force-sync');
+    const args = buildFlowScriptArgs(pre, workspace, extra);
+    const out = await run(cmd, args, 60000);
+    const parsed = JSON.parse(out);
+    flowQuotaCache = { key, fetchedAt: Date.now(), data: parsed };
+    return parsed;
+  })();
+
+  flowSyncInFlight = promise;
+  try {
+    return await promise;
+  } finally {
+    if (flowSyncInFlight === promise) {
+      flowSyncInFlight = null;
+    }
+  }
+}
+
 // --- routes -------------------------------------------------------------------
 
 app.page('/', () => new Response(readFileSync(join(HERE, 'index.html'), 'utf8'), { contentType: 'text/html' }));
@@ -463,9 +610,10 @@ app.api('/api/dashboard', async (data) => {
   const force = String(data.force || '') === '1' || data.force === true;
 
   const pools = await refreshPools(force);
-  const [context, imageQuota] = await Promise.all([
+  const [context, imageQuota, flowQuota] = await Promise.all([
     getContextReport(conversationId, workspace, force).catch((err) => ({ error: 'failed', message: err.message })),
     getImageQuotaReport(workspace, force).catch((err) => ({ error: 'failed', message: err.message })),
+    getFlowQuotaReport(workspace, force).catch((err) => ({ error: 'failed', message: err.message })),
   ]);
 
   const activeModelId = context && !context.error ? (context.model_id || '') : '';
@@ -481,19 +629,43 @@ app.api('/api/dashboard', async (data) => {
       ...activeMeta,
     },
     imageQuota,
+    flowQuota,
   };
 }, 'GET');
 
 app.api('/api/settings', async (data) => {
   try {
-    currentSettings = saveSettings(data);
+    currentSettings = saveSettings(data, currentSettings);
     imageQuotaCache = { key: '', fetchedAt: 0, data: null };
+    flowQuotaCache = { key: '', fetchedAt: 0, data: null };
     const workspace = String(data.workspace || '').trim();
-    const imageQuota = await getImageQuotaReport(workspace, true).catch((err) => ({ error: 'failed', message: err.message }));
+    const [imageQuota, flowQuota] = await Promise.all([
+      getImageQuotaReport(workspace, true).catch((err) => ({ error: 'failed', message: err.message })),
+      getFlowQuotaReport(workspace, true).catch((err) => ({ error: 'failed', message: err.message })),
+    ]);
     return {
       ok: true,
       settings: currentSettings,
       imageQuota,
+      flowQuota,
+      serverNow: Math.floor(Date.now() / 1000),
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}, 'POST');
+
+app.api('/api/flow/sync-credits', async (data) => {
+  try {
+    const workspace = String(data.workspace || '').trim();
+    const forceIgnoreBusy = data.force === true || data.force === '1';
+    const flowQuota = await syncFlowCredits(workspace, forceIgnoreBusy);
+    const syncRes = flowQuota?.sync_result || {};
+    return {
+      ok: Boolean(syncRes.ok),
+      sync: syncRes,
+      error: syncRes.ok ? '' : (syncRes.error || '同步 Flow 积分失败'),
+      flowQuota,
       serverNow: Math.floor(Date.now() / 1000),
     };
   } catch (err) {
