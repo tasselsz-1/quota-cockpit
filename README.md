@@ -24,7 +24,8 @@
 ### 3. 当前对话上下文与 Prompt 缓存命中 · Exact `/context` 明细
 - 解析原生对话 protobuf，实时显示 `used / limit tokens`、单次请求预算预警、100 点占用网格、分类占比（用户 / 模型 / 工具 / 系统 / Rules / Skills / MCP）、Checkpoints 及已加载的 Knowledge / Artifact / Skill / System 文件列表。
 - **Prompt 缓存命中监控**：直接解析本地对话库逐轮 `model_usage`（`cache_read_tokens` 与 `uncached_input_tokens`），在总览与上下文详情页实时展示最新一轮缓存命中率、上轮前缀复用率、当前 `/compact` 压缩段与整场累计命中率、真实缓存失效重建次数（自动区分冷启/新增大文件与真超时失效）、距上轮请求时长（含冷却提示）及近 16 轮命中率迷你轨迹图。
-- 支持一键复制纯文本报告（含 Prompt 缓存摘要），便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
+- **对话步数监控**：紧邻 Prompt 缓存命中下方实时展示对话原生 `steps` 步数（自动区分压缩后本段步数与整场总步数，细分用户提问 / 模型调用 / 工具执行 / 系统 / 压缩次数）。
+- 支持一键复制纯文本报告（含 Prompt 缓存与步数摘要），便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
 
 ### 4. Google Flow 生视频配额 · 账号积分 + 模型可生估算 + 1h/24h 防风控滚轴
 - **毫秒级纯本地零风控监控（`flow_report.py` / `flow_quota/`）**：日常刷新严格只读本地 `gflow-cli` SQLite 数据库（`gflow.db?mode=ro`）与可选防限流账本（`~/.gemini/gflow_traffic_ledger.json`），零网络请求、零浏览器启动、零 Profile 锁争抢；未安装 `gflow-cli` 时优雅降级。

@@ -352,6 +352,13 @@ main { padding: 10px 12px 20px; display: flex; flex-direction: column; gap: 10px
 }
 .cache-strip:hover { border-color: var(--dim); background: var(--card-hi); }
 .cache-strip .meta-row { font-size: 11px; }
+.steps-strip {
+  margin-top: 6px; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  background: color-mix(in srgb, var(--bg) 42%, transparent);
+}
+.steps-strip:hover { border-color: var(--dim); background: var(--card-hi); }
+.steps-strip .meta-row { font-size: 11px; }
 .cache-bar { height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 5px 0 4px; }
 .cache-bar-fill { height: 100%; border-radius: 999px; transition: width .25s ease; }
 .cache-spark {

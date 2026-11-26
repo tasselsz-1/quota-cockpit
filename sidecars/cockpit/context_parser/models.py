@@ -153,6 +153,7 @@ def main():
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
             "cache": st["cache"],
+            "steps": st["steps"],
         }, indent=2))
         return
 

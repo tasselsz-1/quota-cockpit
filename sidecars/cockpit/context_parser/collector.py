@@ -392,6 +392,51 @@ def collect_cache_stats(steps: list[Step], gen: Msg | None, recent_limit: int = 
     }
 
 
+def _summarize_steps(step_slice: list[Step]) -> dict:
+    user = agent = tool = system = checkpoint = 0
+    for step in step_slice:
+        cat = step_category(step.type)
+        if cat == CAT_USER:
+            user += 1
+        elif cat == CAT_AGENT:
+            agent += 1
+        elif cat == CAT_TOOL:
+            tool += 1
+        elif cat == CAT_CHECKPOINT:
+            checkpoint += 1
+        else:
+            system += 1
+    return {
+        "total": len(step_slice),
+        "user": user,
+        "agent": agent,
+        "tool": tool,
+        "system": system,
+        "checkpoint": checkpoint,
+    }
+
+
+def collect_step_stats(steps: list[Step]) -> dict:
+    """Extract conversation step counts for the full session and current post-compaction segment."""
+    compactions = 0
+    last_compact_pos = -1
+    for pos, step in enumerate(steps):
+        if step.payload(STEP_CHECKPOINT) is not None and step.status == STATUS_DONE:
+            compactions += 1
+            last_compact_pos = pos
+
+    has_compaction = compactions > 0
+    seg_steps = steps[last_compact_pos + 1 :] if has_compaction else steps
+    return {
+        "has_data": len(steps) > 0,
+        "total": len(steps),
+        "has_compaction": has_compaction,
+        "compactions": compactions,
+        "segment": _summarize_steps(seg_steps),
+        "session": _summarize_steps(steps),
+    }
+
+
 def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     st = {k: 0 for k in (
         "user", "agent", "tool", "checkpoint", "system_messages", "system_prompt", "system_tools",
@@ -531,4 +576,5 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     st["artifact_files"] = artifacts
     st["skill_files"] = skill_files
     st["cache"] = collect_cache_stats(steps, gen)
+    st["steps"] = collect_step_stats(steps)
     return st

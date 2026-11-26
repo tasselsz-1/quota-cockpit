@@ -5,7 +5,7 @@
     CAT_COLOR, CAT_LABEL,
     esc, fmtTok, fmtClock, fmtHM, fmtUsd, fmtDateTime, fmtMD, cdSpan, barFillColor, gridCells,
     imgStatusMeta, poolWindowsList, winResetHtml, renderPoolWeeklyRecoveryOverview,
-    renderCacheOverviewStrip, renderFlowOverviewCard,
+    renderCacheOverviewStrip, renderStepsOverviewStrip, renderFlowOverviewCard,
   } = QC;
 
   function renderOverview(d) {
@@ -195,6 +195,7 @@
         </div>
         <div class="grid">${cells.map((col) => `<span class="dot"${col ? ` style="background:${col}"` : ''}></span>`).join('')}</div>
         ${renderCacheOverviewStrip(ctx.cache)}
+        ${renderStepsOverviewStrip(ctx.steps)}
         ${topCats.length ? `<div class="sum-grid">${topCats.map((c) => `
           <div class="sum-item">
             <span class="sum-left"><span class="mark" style="background:${CAT_COLOR[c.key] || 'var(--dim)'}"></span><span>${esc(CAT_LABEL[c.key] || c.name)}</span></span>

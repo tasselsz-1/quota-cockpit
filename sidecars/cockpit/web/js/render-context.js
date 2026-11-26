@@ -5,6 +5,10 @@
     CAT_COLOR, CAT_LABEL, CTX_GROUPS, esc, fmtTok, fmtClock, elapsedSpan, gridCells, splitPath,
   } = QC;
 
+  function fmtStepInt(n) {
+    return Math.max(0, Math.round(Number(n) || 0)).toLocaleString('en-US');
+  }
+
   function cacheStatusMeta(cache) {
     if (!cache || !cache.has_data || !cache.latest) {
       return { pill: '', text: '暂无数据', color: 'var(--dim)' };
@@ -134,6 +138,91 @@
     </section>`;
   }
 
+  function renderStepsOverviewStrip(steps) {
+    if (!steps || !steps.has_data) return '';
+    const ses = steps.session || {};
+    const seg = steps.segment || {};
+    const total = Number(steps.total ?? ses.total ?? 0);
+    const hasCompact = Boolean(steps.has_compaction);
+    const compactions = Number(steps.compactions || 0);
+    const segTotal = Number(seg.total || 0);
+    const tip = hasCompact
+      ? `本段（压缩后）${fmtStepInt(segTotal)} 步（用户 ${fmtStepInt(seg.user)} · 模型 ${fmtStepInt(seg.agent)} · 工具 ${fmtStepInt(seg.tool)}）；整场 ${fmtStepInt(total)} 步（用户 ${fmtStepInt(ses.user)} · 模型 ${fmtStepInt(ses.agent)} · 工具 ${fmtStepInt(ses.tool)} · 系统 ${fmtStepInt(ses.system)} · 压缩 ${compactions} 次）`
+      : `当前对话 ${fmtStepInt(total)} 步（用户 ${fmtStepInt(ses.user)} · 模型 ${fmtStepInt(ses.agent)} · 工具 ${fmtStepInt(ses.tool)} · 系统 ${fmtStepInt(ses.system)}）`;
+    const pillHtml = hasCompact
+      ? `<span class="pill pool-a num" style="font-size:10px;padding:1px 5px">本段 ${fmtStepInt(segTotal)} 步</span>`
+      : `<span class="pill num" style="font-size:10px;padding:1px 5px">${fmtStepInt(total)} 步</span>`;
+    const rightTopHtml = hasCompact
+      ? `总计 <strong style="color:var(--fg)">${fmtStepInt(total)}</strong> 步`
+      : `模型 <strong style="color:var(--fg)">${fmtStepInt(ses.agent)}</strong> · 工具 ${fmtStepInt(ses.tool)} · 用户 ${fmtStepInt(ses.user)}`;
+    const secondRowHtml = hasCompact
+      ? `<div class="meta-row">
+          <span class="num">本段 模型 ${fmtStepInt(seg.agent)} · 工具 ${fmtStepInt(seg.tool)} · 用户 ${fmtStepInt(seg.user)}</span>
+          <span class="num">整场 模型 ${fmtStepInt(ses.agent)} · 压缩 ${compactions}次</span>
+        </div>`
+      : '';
+    return `<div class="steps-strip" data-jump="context" title="${esc(tip)}">
+      <div class="meta-row" style="margin-top:0">
+        <span style="color:var(--fg);font-weight:600;display:inline-flex;align-items:center;gap:5px">
+          <span>对话步数</span>
+          ${pillHtml}
+        </span>
+        <span class="num">${rightTopHtml}</span>
+      </div>
+      ${secondRowHtml}
+    </div>`;
+  }
+
+  function renderStepsCard(steps) {
+    if (!steps || !steps.has_data) return '';
+    const ses = steps.session || {};
+    const seg = steps.segment || {};
+    const total = Number(steps.total ?? ses.total ?? 0);
+    const hasCompact = Boolean(steps.has_compaction);
+    const compactions = Number(steps.compactions || 0);
+    const segTotal = Number(seg.total || 0);
+    const kpiHtml = hasCompact
+      ? `<div class="roll-head" style="margin-bottom:6px">
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">本段步数（压缩后）</div>
+            <div class="roll-kpi-val num" style="color:var(--pool-a)">${fmtStepInt(segTotal)} 步</div>
+            <div class="roll-kpi-sub num">模型 ${fmtStepInt(seg.agent)} · 工具 ${fmtStepInt(seg.tool)} · 用户 ${fmtStepInt(seg.user)}</div>
+          </div>
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">整场总步数</div>
+            <div class="roll-kpi-val num">${fmtStepInt(total)} 步</div>
+            <div class="roll-kpi-sub num">模型 ${fmtStepInt(ses.agent)} · 工具 ${fmtStepInt(ses.tool)} · 用户 ${fmtStepInt(ses.user)}</div>
+          </div>
+        </div>`
+      : `<div class="roll-head" style="margin-bottom:6px">
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">当前对话步数</div>
+            <div class="roll-kpi-val num">${fmtStepInt(total)} 步</div>
+            <div class="roll-kpi-sub num">用户 ${fmtStepInt(ses.user)} · 模型 ${fmtStepInt(ses.agent)} · 工具 ${fmtStepInt(ses.tool)}</div>
+          </div>
+          <div class="roll-kpi">
+            <div class="roll-kpi-lbl">模型 / 工具步数</div>
+            <div class="roll-kpi-val num">${fmtStepInt(ses.agent)} / ${fmtStepInt(ses.tool)}</div>
+            <div class="roll-kpi-sub num">系统 ${fmtStepInt(ses.system)} · 检查点 ${fmtStepInt(ses.checkpoint)}</div>
+          </div>
+        </div>`;
+    return `<section class="card">
+      <div class="ch">
+        <span class="ctitle">对话步数 <span class="pill ${hasCompact ? 'pool-a' : ''}">${hasCompact ? `已压缩 ${compactions} 次` : '未压缩'}</span></span>
+        <span class="sub num">共 ${fmtStepInt(total)} 步</span>
+      </div>
+      ${kpiHtml}
+      <div class="chips" style="margin-top:0">
+        <span class="chip num">用户 <strong>${fmtStepInt(ses.user)}</strong></span>
+        <span class="chip num">模型 <strong>${fmtStepInt(ses.agent)}</strong></span>
+        <span class="chip num">工具 <strong>${fmtStepInt(ses.tool)}</strong></span>
+        ${ses.system > 0 ? `<span class="chip num">系统 <strong>${fmtStepInt(ses.system)}</strong></span>` : ''}
+        ${compactions > 0 ? `<span class="chip num">压缩 <strong>${compactions}次</strong></span>` : ''}
+      </div>
+      <div class="sub" style="margin-top:6px;line-height:1.4">取自对话库原生 <span class="mono">steps</span> 表；本段步数自最近一次已完成压缩（<span class="mono">/compact</span>）起计。</div>
+    </section>`;
+  }
+
   function renderFileList(title, hint, items) {
     if (!items || !items.length) return '';
     return `<section class="card">
@@ -210,6 +299,10 @@
       parts.push(renderCacheCard(ctx.cache));
     }
 
+    if (ctx.steps && ctx.steps.has_data) {
+      parts.push(renderStepsCard(ctx.steps));
+    }
+
     if (ctx.checkpoint_view) {
       const ck = ctx.checkpoint_view;
       parts.push(`<section class="card">
@@ -237,6 +330,8 @@
     cacheTurnStatusLabel,
     renderCacheOverviewStrip,
     renderCacheCard,
+    renderStepsOverviewStrip,
+    renderStepsCard,
     renderFileList,
     renderContext,
   });

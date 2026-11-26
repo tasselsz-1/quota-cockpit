@@ -50,9 +50,9 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
         "`renderPools`, `renderPoolWeeklyRecoveryOverview`, `renderPoolWeeklyRecoveryDetail`",
     ),
     (
-        "Context & Prompt Cache tab UI",
+        "Context, Prompt Cache & Step Count tab UI",
         "`sidecars/cockpit/web/js/render-context.js`",
-        "`renderContext`, `renderCacheCard`, `renderCacheOverviewStrip`",
+        "`renderContext`, `renderCacheCard`, `renderCacheOverviewStrip`, `renderStepsCard`, `renderStepsOverviewStrip`",
     ),
     (
         "Google Flow Video tab & overview card UI",
@@ -152,7 +152,7 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
     (
         "Conversation protobuf decoding & cache hit analytics",
         "`sidecars/cockpit/context_parser/protobuf.py`, `sidecars/cockpit/context_parser/collector.py`",
-        "`Msg`, `read_varint`, `collect_cache_stats`, `collect_stats`",
+        "`Msg`, `read_varint`, `collect_cache_stats`, `collect_step_stats`, `collect_stats`",
     ),
     (
         "Context CLI rendering & model window table",

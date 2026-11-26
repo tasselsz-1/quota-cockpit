@@ -340,6 +340,14 @@ function buildFixtureDashboard() {
         session: { hit_rate_pct: 89.2, turns: 12, misses: 0, cache_read_tokens: 280000 },
         recent: [{ status: 'high', hit_rate_pct: 91.5, cache_read_tokens: 35000, uncached_input_tokens: 3250, ts: now - 30 }],
       },
+      steps: {
+        has_data: true,
+        total: 1581,
+        has_compaction: true,
+        compactions: 14,
+        segment: { total: 12, user: 1, agent: 3, tool: 8, system: 0, checkpoint: 0 },
+        session: { total: 1581, user: 50, agent: 478, tool: 1004, system: 33, checkpoint: 16 },
+      },
       text: 'context text summary',
     },
     flowQuota: {
@@ -485,9 +493,32 @@ test('end-to-end VM execution of all 10 classic scripts renders all 5 tabs witho
   QC.setTab('overview');
   const overviewHtml = viewEl.innerHTML;
   const ctxCardIdx = overviewHtml.indexOf('当前上下文');
+  const ovCacheIdx = overviewHtml.indexOf('Prompt 缓存');
+  const ovStepsIdx = overviewHtml.indexOf('对话步数');
   const flowCardIdx = overviewHtml.indexOf('Flow 生视频');
   assert.ok(ctxCardIdx >= 0, 'Overview HTML must contain Context card');
-  assert.ok(flowCardIdx > ctxCardIdx, 'Flow card must appear AFTER Context card in rendered Overview HTML');
+  assert.ok(ovCacheIdx > ctxCardIdx, 'Overview HTML must contain Prompt cache strip');
+  assert.ok(ovStepsIdx > ovCacheIdx, 'Steps strip must appear directly AFTER Prompt cache strip in Overview HTML');
+  assert.ok(overviewHtml.includes('本段 12 步') && overviewHtml.includes('1,581'), 'Overview steps strip must show segment and total step counts');
+  assert.ok(flowCardIdx > ovStepsIdx, 'Flow card must appear AFTER Context/Steps card in rendered Overview HTML');
+
+  QC.setTab('context');
+  const contextHtml = viewEl.innerHTML;
+  const ctxCacheIdx = contextHtml.indexOf('Prompt 缓存命中');
+  const ctxStepsIdx = contextHtml.indexOf('对话步数');
+  assert.ok(ctxCacheIdx >= 0, 'Context tab HTML must contain Prompt cache hit card');
+  assert.ok(ctxStepsIdx > ctxCacheIdx, 'Steps card must appear directly AFTER Prompt cache hit card in Context tab HTML');
+  assert.ok(contextHtml.includes('本段步数（压缩后）') && contextHtml.includes('1,581 步'), 'Context tab steps card must display segment and session step counts');
+
+  const uncompactedStrip = QC.renderStepsOverviewStrip({
+    has_data: true,
+    total: 63,
+    has_compaction: false,
+    compactions: 0,
+    segment: { total: 63, user: 1, agent: 12, tool: 50, system: 0, checkpoint: 0 },
+    session: { total: 63, user: 1, agent: 12, tool: 50, system: 0, checkpoint: 0 },
+  });
+  assert.ok(uncompactedStrip.includes('63 步') && !uncompactedStrip.includes('本段'), 'Uncompacted steps strip should show total steps concisely');
 });
 
 test('.tabs in web/index.html places Flow last on the far right', () => {

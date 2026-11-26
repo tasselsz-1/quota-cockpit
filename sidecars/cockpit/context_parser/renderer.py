@@ -65,6 +65,21 @@ def render_stats(st: dict, model: str) -> str:
             f"({fmt_tok(lat['cache_read_tokens'])} hit / {fmt_tok(lat['uncached_input_tokens'])} new) · "
             f"session {ses['hit_rate_pct']:.1f}% ({ses['turns']} turns, {ses['misses']} miss)\n"
         )
+    steps_info = st.get("steps") or {}
+    if steps_info.get("has_data"):
+        ses_s = steps_info.get("session") or {}
+        seg_s = steps_info.get("segment") or {}
+        if steps_info.get("has_compaction"):
+            out.append(
+                f"▸ Steps: segment {seg_s.get('total', 0)} "
+                f"(model {seg_s.get('agent', 0)} / tool {seg_s.get('tool', 0)}) · "
+                f"session {ses_s.get('total', 0)} ({steps_info.get('compactions', 0)} compactions)\n"
+            )
+        else:
+            out.append(
+                f"▸ Steps: {ses_s.get('total', 0)} "
+                f"(model {ses_s.get('agent', 0)} · tool {ses_s.get('tool', 0)} · user {ses_s.get('user', 0)})\n"
+            )
     return "".join(out)
 
 

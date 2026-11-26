@@ -69,6 +69,11 @@ def _make_gen_with_usage(uncached: int, cache_read: int, output: int = 120) -> c
     return cr.Msg(_pb_bytes(1, chat))
 
 
+def _make_simple_step(pos: int, step_type: int) -> cr.Step:
+    payload = _pb_int(1, step_type) + _pb_int(4, cr.STATUS_DONE)
+    return cr.Step(pos, payload, step_type, cr.STATUS_DONE, b"")
+
+
 class ContextCacheStatsTests(unittest.TestCase):
     def test_empty_steps_no_gen(self):
         c = cr.collect_cache_stats([], None)
@@ -157,6 +162,71 @@ class ContextCacheStatsTests(unittest.TestCase):
         rendered = cr.render_stats(st, "Test Model")
         self.assertIn("Prompt cache: latest 97.0%", rendered)
         self.assertIn("97.0k hit / 3.0k new", rendered)
+
+
+class ContextStepStatsTests(unittest.TestCase):
+    def test_empty_steps(self):
+        s = cr.collect_step_stats([])
+        self.assertFalse(s["has_data"])
+        self.assertEqual(s["total"], 0)
+        self.assertFalse(s["has_compaction"])
+        self.assertEqual(s["compactions"], 0)
+        self.assertEqual(s["segment"]["total"], 0)
+        self.assertEqual(s["session"]["total"], 0)
+
+    def test_uncompacted_step_breakdown_and_render_order(self):
+        t0 = 1_795_500_000
+        steps = [
+            _make_simple_step(0, 101),  # SYSTEM
+            _make_simple_step(1, 14),   # USER
+            _make_planner_step(2, uncached=20_000, cache_read=0, ts=t0),  # AGENT
+            _make_simple_step(3, 8),    # TOOL (VIEW_FILE)
+            _make_simple_step(4, 132),  # TOOL (GENERIC)
+            _make_planner_step(5, uncached=1_000, cache_read=20_000, ts=t0 + 15),  # AGENT
+        ]
+        st = cr.collect_stats(steps, None, 250_000)
+        s = st["steps"]
+        self.assertTrue(s["has_data"])
+        self.assertEqual(s["total"], 6)
+        self.assertFalse(s["has_compaction"])
+        self.assertEqual(s["compactions"], 0)
+        self.assertEqual(s["session"], {"total": 6, "user": 1, "agent": 2, "tool": 2, "system": 1, "checkpoint": 0})
+        self.assertEqual(s["segment"], s["session"])
+
+        rendered = cr.render_stats(st, "Test Model")
+        cache_idx = rendered.find("Prompt cache:")
+        steps_idx = rendered.find("▸ Steps: 6 (model 2 · tool 2 · user 1)")
+        self.assertGreaterEqual(cache_idx, 0)
+        self.assertGreater(steps_idx, cache_idx)
+
+    def test_compaction_splits_segment_steps_and_just_compacted_zero(self):
+        t0 = 1_795_500_000
+        steps = [
+            _make_simple_step(0, 14),
+            _make_planner_step(1, uncached=20_000, cache_read=0, ts=t0),
+            _make_simple_step(2, 8),
+            _make_checkpoint_step(3, ck_idx=0, intent="compact 1"),
+            _make_simple_step(4, 14),
+            _make_planner_step(5, uncached=15_000, cache_read=0, ts=t0 + 60),
+            _make_simple_step(6, 8),
+            _make_simple_step(7, 132),
+        ]
+        st = cr.collect_stats(steps, None, 250_000)
+        s = st["steps"]
+        self.assertTrue(s["has_compaction"])
+        self.assertEqual(s["compactions"], 1)
+        self.assertEqual(s["total"], 8)
+        self.assertEqual(s["session"], {"total": 8, "user": 2, "agent": 2, "tool": 3, "system": 0, "checkpoint": 1})
+        self.assertEqual(s["segment"], {"total": 4, "user": 1, "agent": 1, "tool": 2, "system": 0, "checkpoint": 0})
+
+        rendered = cr.render_stats(st, "Test Model")
+        self.assertIn("▸ Steps: segment 4 (model 1 / tool 2) · session 8 (1 compactions)", rendered)
+
+        just_compacted = steps + [_make_checkpoint_step(8, ck_idx=1, intent="compact 2")]
+        s2 = cr.collect_step_stats(just_compacted)
+        self.assertEqual(s2["compactions"], 2)
+        self.assertEqual(s2["total"], 9)
+        self.assertEqual(s2["segment"]["total"], 0)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@
 | Sticky top header | `sidecars/cockpit/web/js/render-header.js` | `updateHeader` |
 | Image Quota tab / pin peak / settings UI | `sidecars/cockpit/web/js/render-image.js`, `sidecars/cockpit/web/js/actions.js` | `renderImage`, `saveSettings`, `pinPeak`, `resetCalibration` |
 | Model Quota Pools tab / weekly recovery UI | `sidecars/cockpit/web/js/render-pools.js` | `renderPools`, `renderPoolWeeklyRecoveryOverview`, `renderPoolWeeklyRecoveryDetail` |
-| Context & Prompt Cache tab UI | `sidecars/cockpit/web/js/render-context.js` | `renderContext`, `renderCacheCard`, `renderCacheOverviewStrip` |
+| Context, Prompt Cache & Step Count tab UI | `sidecars/cockpit/web/js/render-context.js` | `renderContext`, `renderCacheCard`, `renderCacheOverviewStrip`, `renderStepsCard`, `renderStepsOverviewStrip` |
 | Google Flow Video tab & overview card UI | `sidecars/cockpit/web/js/render-flow.js`, `sidecars/cockpit/web/js/actions.js` | `renderFlow`, `renderFlowOverviewCard`, `saveFlowSettings`, `syncFlowCredits` |
 | CSS / theme / scrollbar | `sidecars/cockpit/web/styles.css` | `:root` tokens, `.card`, `.pill`, `.tabs`, scrollbar rules |
 | Formatters / countdown tickers | `sidecars/cockpit/web/js/formatters.js` | `fmtTok`, `fmtDuration`, `cdSpan`, `tickCountdowns`, `fmtCredits` |
@@ -31,7 +31,7 @@
 | Flow read-only ledger, gflow.db, locks & workspace runs | `sidecars/cockpit/flow_quota/readers.py` | `read_ledger`, `read_gflow_db`, `inspect_profile_locks`, `scan_workspace_flow_runs` |
 | Flow manual live credit sync & structlog stripping | `sidecars/cockpit/flow_quota/sync.py` | `parse_gflow_json_stdout`, `sync_live_credits` |
 | Flow 1h/24h anti-throttle rolling buckets & circuit breaker | `sidecars/cockpit/flow_quota/report.py` | `build_rolling_buckets`, `compute_breaker`, `merge_profiles`, `build_report` |
-| Conversation protobuf decoding & cache hit analytics | `sidecars/cockpit/context_parser/protobuf.py`, `sidecars/cockpit/context_parser/collector.py` | `Msg`, `read_varint`, `collect_cache_stats`, `collect_stats` |
+| Conversation protobuf decoding & cache hit analytics | `sidecars/cockpit/context_parser/protobuf.py`, `sidecars/cockpit/context_parser/collector.py` | `Msg`, `read_varint`, `collect_cache_stats`, `collect_step_stats`, `collect_stats` |
 | Context CLI rendering & model window table | `sidecars/cockpit/context_parser/renderer.py`, `sidecars/cockpit/context_parser/models.py` | `render`, `load`, `NATIVE_CONTEXT_WINDOWS`, `context_limit` |
 | Local 7d per-pool usage scanner | `sidecars/cockpit/pool_usage_report.py` | `pool_key_for_usage`, `scan_single_db_usage`, `build_pool_usage_report` |
 | Index generator & drift guard | `scripts/generate_index.py`, `tests/test_project_index.py` | `generate_markdown`, `main`, `TestProjectIndex` |
@@ -75,7 +75,7 @@
 
 ## 4. 分层模块目录总览（自动统计行数）
 
-### Frontend (`sidecars/cockpit/web/`) — 12 files, 2671 lines
+### Frontend (`sidecars/cockpit/web/`) — 12 files, 2774 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
@@ -83,14 +83,14 @@
 | `sidecars/cockpit/web/js/actions.js` | 209 | Frontend API actions for settings, Flow sync, peak pinning, calibration reset, and refresh. |
 | `sidecars/cockpit/web/js/app.js` | 239 | DOM diff renderer, tab router, event delegation, and polling loop. |
 | `sidecars/cockpit/web/js/formatters.js` | 173 | Token/duration/currency/credit formatters, countdown tags, and grid cell helpers. |
-| `sidecars/cockpit/web/js/render-context.js` | 243 | Context & Prompt Cache tab: 100-dot grid, cache hit analytics, and file sections. |
+| `sidecars/cockpit/web/js/render-context.js` | 338 | Context & Prompt Cache tab: 100-dot grid, cache hit analytics, and file sections. |
 | `sidecars/cockpit/web/js/render-flow.js` | 332 | Google Flow tab: synced credits, 1h/24h rolling caps, breaker status, and settings. |
 | `sidecars/cockpit/web/js/render-header.js` | 94 | Sticky header renderer for active model, pool pill, and 5h/weekly summary. |
 | `sidecars/cockpit/web/js/render-image.js` | 455 | Image Quota tab: anchor gauge, rolling schedules, calibration, and settings form. |
-| `sidecars/cockpit/web/js/render-overview.js` | 215 | Overview tab summary cards (Image, Pools, Context/Cache, Flow). |
+| `sidecars/cockpit/web/js/render-overview.js` | 216 | Overview tab summary cards (Image, Pools, Context/Cache, Flow). |
 | `sidecars/cockpit/web/js/render-pools.js` | 223 | Model Quota Pools tab: Pool A/B windows, model list, and 7d weekly recovery. |
 | `sidecars/cockpit/web/js/state.js` | 55 | Shared reactive UI state, polling interval, and context category constants. |
-| `sidecars/cockpit/web/styles.css` | 394 | Cockpit dark theme variables, layout cards, grids, badges, and scrollbar styles. |
+| `sidecars/cockpit/web/styles.css` | 401 | Cockpit dark theme variables, layout cards, grids, badges, and scrollbar styles. |
 
 ### Node Backend (`sidecars/cockpit/`) — 10 files, 1970 lines
 
@@ -107,16 +107,16 @@
 | `sidecars/cockpit/pools_logic.mjs` | 21 | Backward-compatible facade re-exporting pool model and weekly recovery helpers. |
 | `sidecars/cockpit/sidecar.json` | 18 | Sidecar manifest declaring entrypoint and runtime metadata. |
 
-### Python Analyzers (`sidecars/cockpit/`) — 20 files, 5729 lines
+### Python Analyzers (`sidecars/cockpit/`) — 20 files, 5797 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
-| `sidecars/cockpit/context_parser/__init__.py` | 149 | Subpackage facade re-exporting protobuf, models, collector, and renderer APIs. |
-| `sidecars/cockpit/context_parser/collector.py` | 534 | Conversation step token accounting, system file detection, and prompt cache stats. |
-| `sidecars/cockpit/context_parser/models.py` | 159 | Model context window catalog, effort levels, and model label helpers. |
+| `sidecars/cockpit/context_parser/__init__.py` | 153 | Subpackage facade re-exporting protobuf, models, collector, and renderer APIs. |
+| `sidecars/cockpit/context_parser/collector.py` | 580 | Conversation step token accounting, system file detection, and prompt cache stats. |
+| `sidecars/cockpit/context_parser/models.py` | 160 | Model context window catalog, effort levels, and model label helpers. |
 | `sidecars/cockpit/context_parser/protobuf.py` | 156 | Lightweight protobuf varint/wire decoder and step type constants. |
-| `sidecars/cockpit/context_parser/renderer.py` | 183 | CLI text report and JSON loader for conversation context usage. |
-| `sidecars/cockpit/context_report.py` | 88 | CLI entrypoint and compatibility re-exports for `context_parser`. |
+| `sidecars/cockpit/context_parser/renderer.py` | 198 | CLI text report and JSON loader for conversation context usage. |
+| `sidecars/cockpit/context_report.py` | 90 | CLI entrypoint and compatibility re-exports for `context_parser`. |
 | `sidecars/cockpit/flow_quota/__init__.py` | 105 | Subpackage facade re-exporting Flow quota constants, readers, sync, and report APIs. |
 | `sidecars/cockpit/flow_quota/constants.py` | 236 | Flow video model specs, credit pricing, defaults, and gflow binary lookup. |
 | `sidecars/cockpit/flow_quota/readers.py` | 287 | Read-only readers for Flow ledger, `gflow.db`, profile locks, and workspace runs. |
@@ -132,31 +132,31 @@
 | `sidecars/cockpit/pool_usage_report.py` | 384 | Read-only 7-day per-pool usage scanner over local conversation DBs. |
 | `sidecars/cockpit/quota_report.py` | 85 | CLI entrypoint and compatibility re-exports for `image_quota`. |
 
-### Tests (`tests/`) — 8 files, 2540 lines
+### Tests (`tests/`) — 8 files, 2641 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
-| `tests/test_context_report.py` | 163 | Unit tests for context protobuf parsing and cache hit analytics. |
+| `tests/test_context_report.py` | 233 | Unit tests for context protobuf parsing and cache hit analytics. |
 | `tests/test_flow_report.py` | 285 | Unit tests for Flow rolling buckets, circuit breaker, and credit sync parsing. |
 | `tests/test_pool_usage_report.py` | 181 | Unit tests for 7d per-pool local usage aggregation. |
 | `tests/test_pools.mjs` | 343 | Node tests for pool model classification and weekly recovery math. |
 | `tests/test_project_index.py` | 54 | Drift guard verifying `PROJECT_INDEX.md` stays synchronized with the codebase. |
 | `tests/test_quota_report.py` | 849 | Unit tests for image quota scanning, schedules, calibration, and anchors. |
 | `tests/test_sidecar_routes.mjs` | 132 | Node tests for sidecar route wiring, settings, and report caching. |
-| `tests/test_web_assets.mjs` | 533 | Node tests for web asset collection, cache headers, and settings normalization. |
+| `tests/test_web_assets.mjs` | 564 | Node tests for web asset collection, cache headers, and settings normalization. |
 
-### Tooling & Metadata — 6 files, 803 lines
+### Tooling & Metadata — 6 files, 804 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
 | `.gitignore` | 19 | Repository file. |
 | `LICENSE` | 21 | Repository file. |
-| `README.md` | 123 | Plugin overview, architecture summary, and installation/usage guide. |
+| `README.md` | 124 | Plugin overview, architecture summary, and installation/usage guide. |
 | `assets/logo.svg` | 17 | Plugin vector icon displayed in Antigravity UI. |
 | `plugin.json` | 21 | Antigravity plugin manifest describing name, version, and suggested prompts. |
 | `scripts/generate_index.py` | 602 | Automated `PROJECT_INDEX.md` generator and `--check` drift verifier. |
 
-**Total Tracked Source & Doc Files**: 56 files, 13713 lines (excluding `PROJECT_INDEX.md`).
+**Total Tracked Source & Doc Files**: 56 files, 13986 lines (excluding `PROJECT_INDEX.md`).
 
 ## 5. 符号级精确行号索引（自动提取）
 
@@ -165,20 +165,20 @@
 - **`scripts/generate_index.py`** (602L)
   - Symbols: `def count_lines` (L250-L252), `def iter_repo_files` (L255-L267), `def extract_http_routes` (L270-L281), `def collect_static_web_routes` (L284-L295), `def classify_group` (L298-L310), `def is_pure_py_facade` (L313-L323), `def extract_python_symbols` (L326-L351), `def extract_js_symbols` (L354-L396), `def render_table` (L399-L407), `def generate_markdown` (L410-L562), `def main` (L565-L598)
   - Constants: `REPO_ROOT` (L21), `INDEX_PATH` (L22), `EXCLUDED_DIRS` (L23), `EXCLUDED_FILES` (L24), `ROUTING_ROWS` (L26), `DATA_FILES` (L174), `READONLY_SOURCES` (L184), `FILE_DESCRIPTIONS` (L192)
-- **`sidecars/cockpit/context_parser/__init__.py`** (149L): Subpackage facade / re-exports.
-- **`sidecars/cockpit/context_parser/collector.py`** (534L)
-  - Symbols: `def step_category` (L38-L47), `def packed_original_step` (L55-L68), `def is_skill_file` (L71-L72), `class Step` (L75-L114), `def _varint` (L117-L125), `def estimate_step_tokens` (L128-L143), `def step_tokens` (L146-L150), `def compaction_tokens` (L153-L163), `def checkpoint_summary_tokens` (L166-L171), `def checkpoint_newer_than_generation` (L174-L190), `def chat_tokens_by_category` (L193-L211), `def detect_system_files` (L214-L238), `def step_timestamp` (L241-L249), `def _summarize_cache_turns` (L252-L276), `def collect_cache_stats` (L279-L392), `def collect_stats` (L395-L534)
+- **`sidecars/cockpit/context_parser/__init__.py`** (153L): Subpackage facade / re-exports.
+- **`sidecars/cockpit/context_parser/collector.py`** (580L)
+  - Symbols: `def step_category` (L38-L47), `def packed_original_step` (L55-L68), `def is_skill_file` (L71-L72), `class Step` (L75-L114), `def _varint` (L117-L125), `def estimate_step_tokens` (L128-L143), `def step_tokens` (L146-L150), `def compaction_tokens` (L153-L163), `def checkpoint_summary_tokens` (L166-L171), `def checkpoint_newer_than_generation` (L174-L190), `def chat_tokens_by_category` (L193-L211), `def detect_system_files` (L214-L238), `def step_timestamp` (L241-L249), `def _summarize_cache_turns` (L252-L276), `def collect_cache_stats` (L279-L392), `def _summarize_steps` (L395-L416), `def collect_step_stats` (L419-L437), `def collect_stats` (L440-L580)
   - Constants: `STEP_GENERIC` (L50), `GENERIC_TYPE` (L51), `ORIGINAL_STEP_TYPE_URL` (L52)
-- **`sidecars/cockpit/context_parser/models.py`** (159L)
-  - Symbols: `def model_id` (L36-L38), `def model_label` (L41-L56), `def model_name` (L59-L67), `def context_limit` (L70-L76), `def request_budget` (L79-L83), `def main` (L86-L159)
+- **`sidecars/cockpit/context_parser/models.py`** (160L)
+  - Symbols: `def model_id` (L36-L38), `def model_label` (L41-L56), `def model_name` (L59-L67), `def context_limit` (L70-L76), `def request_budget` (L79-L83), `def main` (L86-L160)
   - Constants: `NATIVE_CONTEXT_WINDOWS` (L24), `EFFORT_LEVELS` (L32), `WORD_LABELS` (L33)
 - **`sidecars/cockpit/context_parser/protobuf.py`** (156L)
   - Symbols: `def read_varint` (L9-L19), `class Msg` (L22-L69), `def fmt_tok` (L126-L132), `def fmt_ctx_limit` (L135-L136), `def go_div4` (L139-L141), `def shorten_path` (L144-L156)
   - Constants: `STEP_VIEW_FILE` (L73), `STEP_USER_INPUT` (L74), `STEP_PLANNER_RESPONSE` (L75), `STEP_CHECKPOINT` (L76), `STEP_CODE_ACTION` (L77), `STATUS_DONE` (L79), `STEP_TYPES` (L86)
-- **`sidecars/cockpit/context_parser/renderer.py`** (183L)
-  - Symbols: `def pct` (L31-L32), `def stats_heading` (L35-L40), `def render_stats` (L43-L68), `def grid_segments` (L71-L79), `def render_grid` (L82-L97), `def checkpoint_view` (L100-L117), `def render_checkpoints` (L120-L130), `def render_file_section` (L133-L139), `def render` (L142-L168), `def load` (L174-L183)
+- **`sidecars/cockpit/context_parser/renderer.py`** (198L)
+  - Symbols: `def pct` (L31-L32), `def stats_heading` (L35-L40), `def render_stats` (L43-L83), `def grid_segments` (L86-L94), `def render_grid` (L97-L112), `def checkpoint_view` (L115-L132), `def render_checkpoints` (L135-L145), `def render_file_section` (L148-L154), `def render` (L157-L183), `def load` (L189-L198)
   - Constants: `CATEGORIES` (L11), `GRID_COLORS` (L28)
-- **`sidecars/cockpit/context_report.py`** (88L): CLI wrapper / compatibility re-exports.
+- **`sidecars/cockpit/context_report.py`** (90L): CLI wrapper / compatibility re-exports.
 - **`sidecars/cockpit/flow_quota/__init__.py`** (105L): Subpackage facade / re-exports.
 - **`sidecars/cockpit/flow_quota/constants.py`** (236L)
   - Symbols: `def default_gflow_data_dir` (L112-L126), `def default_ledger_path` (L129-L135), `def find_gflow_bin` (L138-L153), `def parse_iso_ts` (L156-L170), `def safe_float` (L173-L178), `def safe_int` (L181-L185), `def canonical_model_id` (L188-L198), `def model_label` (L201-L205), `def is_pid_alive` (L208-L236)
@@ -235,15 +235,15 @@
 - **`sidecars/cockpit/web/js/formatters.js`** (173L)
   - Functions: `function fmtTok` (L11), `function fmtClock` (L18), `function fmtHM` (L24), `function fmtUsd` (L31), `function fmtDateTime` (L38), `function fmtMD` (L45), `function fmtDuration` (L52), `function cdSpan` (L65), `function fmtElapsed` (L70), `function elapsedTextWithHint` (L82), `function elapsedSpan` (L90), `function tickCountdowns` (L97), `function healthCls` (L115), `function barFillColor` (L121), `function gridCells` (L127), `function splitPath` (L141), `function fmtCredits` (L146)
   - Exports: `const nowSec` (L6), `const esc` (L7)
-- **`sidecars/cockpit/web/js/render-context.js`** (243L)
-  - Functions: `function cacheStatusMeta` (L8), `function cacheTurnStatusLabel` (L26), `function renderCacheOverviewStrip` (L36), `function renderCacheCard` (L64), `function renderFileList` (L137), `function renderContext` (L149)
+- **`sidecars/cockpit/web/js/render-context.js`** (338L)
+  - Functions: `function fmtStepInt` (L8), `function cacheStatusMeta` (L12), `function cacheTurnStatusLabel` (L30), `function renderCacheOverviewStrip` (L40), `function renderCacheCard` (L68), `function renderStepsOverviewStrip` (L141), `function renderStepsCard` (L176), `function renderFileList` (L226), `function renderContext` (L238)
 - **`sidecars/cockpit/web/js/render-flow.js`** (332L)
   - Functions: `function flowStatusMeta` (L8), `function renderFlowOverviewCard` (L19), `function renderFlowSchedule` (L100), `function renderFlow` (L117)
 - **`sidecars/cockpit/web/js/render-header.js`** (94L)
   - Functions: `function updateHeader` (L8)
 - **`sidecars/cockpit/web/js/render-image.js`** (455L)
   - Functions: `function imgStatusMeta` (L8), `function eventTagInfo` (L35), `function renderImage` (L44)
-- **`sidecars/cockpit/web/js/render-overview.js`** (215L)
+- **`sidecars/cockpit/web/js/render-overview.js`** (216L)
   - Functions: `function renderOverview` (L11)
 - **`sidecars/cockpit/web/js/render-pools.js`** (223L)
   - Functions: `function weeklyRecSourceMeta` (L8), `function renderPoolWeeklyRecoveryOverview` (L17), `function renderPoolWeeklyRecoveryDetail` (L42), `function poolWindowsList` (L93), `function winResetHtml` (L113), `function renderPools` (L127)
