@@ -93,7 +93,7 @@ quota-cockpit/
 │   ├── context_report.py        # 上下文解析薄 CLI 门面（重导出 context_parser/）
 │   ├── pool_usage_report.py     # 本地 7 天分池对话消耗增量扫描器
 │   ├── lib/                     # Node 后端模块（settings / runner / ls_client / reports / pools_*）
-│   ├── web/                     # 前端静态资源（index.html / styles.css / js/*.js 原生 ESM）
+│   ├── web/                     # 前端静态资源（index.html / styles.css / js/*.js 经典 IIFE 模块化脚本）
 │   ├── image_quota/             # 生图配额 Python 子包（constants / scanner / schedules / calibration / report）
 │   ├── flow_quota/              # Flow 配额 Python 子包（constants / readers / sync / report）
 │   └── context_parser/          # 上下文解析 Python 子包（protobuf / collector / renderer / models）

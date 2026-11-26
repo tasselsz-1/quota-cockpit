@@ -190,7 +190,7 @@ READONLY_SOURCES: list[tuple[str, str]] = [
 ]
 
 FILE_DESCRIPTIONS: dict[str, str] = {
-    "sidecars/cockpit/web/index.html": "Top header, 5-tab navigation shell, and module script entry.",
+    "sidecars/cockpit/web/index.html": "Top header, 5-tab navigation shell, and classic modular script entries.",
     "sidecars/cockpit/web/styles.css": "Cockpit dark theme variables, layout cards, grids, badges, and scrollbar styles.",
     "sidecars/cockpit/web/js/state.js": "Shared reactive UI state, polling interval, and context category constants.",
     "sidecars/cockpit/web/js/formatters.js": "Token/duration/currency/credit formatters, countdown tags, and grid cell helpers.",
@@ -352,23 +352,35 @@ def extract_python_symbols(path: Path) -> tuple[bool, list[str], list[str]]:
 
 
 def extract_js_symbols(path: Path) -> tuple[bool, list[str], list[str]]:
-    """Extract top-level JS/MJS functions and export consts with line numbers."""
+    """Extract module-level JS/MJS functions and const exports with line numbers.
+
+    Supports both top-level ESM declarations (`export function` / `export const`
+    in `*.mjs`) and 2-space-indented classic IIFE declarations (`function` / `const`
+    inside `(function (QC) { ... })` in `web/js/*.js`).
+    """
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
 
     if path.name == "pools_logic.mjs":
         return True, [], []
 
-    decl_re = re.compile(
-        r"^(?P<export>export\s+)?(?P<async>async\s+)?(?P<kind>function|const|class)\s+(?P<name>[A-Za-z_]\w*)"
-    )
+    is_classic_iife = path.suffix == ".js" and "(function (QC)" in text
+    if is_classic_iife:
+        decl_re = re.compile(
+            r"^  (?P<async>async\s+)?(?P<kind>function|const|class)\s+(?P<name>[A-Za-z_$][\w$]*)"
+        )
+    else:
+        decl_re = re.compile(
+            r"^(?P<export>export\s+)?(?P<async>async\s+)?(?P<kind>function|const|class)\s+(?P<name>[A-Za-z_$][\w$]*)"
+        )
+
     functions: list[str] = []
     exported_consts: list[str] = []
     for idx, line in enumerate(lines, start=1):
         match = decl_re.match(line)
         if not match:
             continue
-        is_export = bool(match.group("export"))
+        is_export = bool(match.groupdict().get("export"))
         is_async = bool(match.group("async"))
         kind = match.group("kind")
         name = match.group("name")
@@ -376,8 +388,11 @@ def extract_js_symbols(path: Path) -> tuple[bool, list[str], list[str]]:
             exp_prefix = "export " if is_export else ""
             async_prefix = "async " if is_async else ""
             functions.append(f"`{exp_prefix}{async_prefix}{kind} {name}` (L{idx})")
-        elif kind == "const" and is_export:
-            exported_consts.append(f"`export const {name}` (L{idx})")
+        elif kind == "const":
+            if is_classic_iife:
+                exported_consts.append(f"`const {name}` (L{idx})")
+            elif is_export:
+                exported_consts.append(f"`export const {name}` (L{idx})")
     return False, functions, exported_consts
 
 
@@ -436,7 +451,7 @@ def generate_markdown() -> str:
 
     static_routes = collect_static_web_routes(REPO_ROOT / "sidecars" / "cockpit" / "web")
     lines.append(
-        f"**Static Web Routes** (`sidecars/cockpit/lib/runner.mjs` → `registerWebAssets`, all served with `Cache-Control: no-store`, {len(static_routes)} routes): "
+        f"**Static Web Routes** (`sidecars/cockpit/lib/runner.mjs` → `registerWebAssets`, all served with `Cache-Control: no-store` & `X-Content-Type-Options: nosniff`, {len(static_routes)} routes): "
         + ", ".join(f"`{r}`" for r in static_routes)
     )
     lines.append("")

@@ -47,7 +47,7 @@
 | `POST` | `/api/calibration/reset` | `sidecars/cockpit/main.mjs` (L171-L181) | Deletes `image-calibration.json`, invalidates cache, and rebuilds image quota report. |
 | `GET` | `/api/report` | `sidecars/cockpit/main.mjs` (L183-L190) | Refreshes pool state (cached) and returns context report for a single conversation. |
 
-**Static Web Routes** (`sidecars/cockpit/lib/runner.mjs` → `registerWebAssets`, all served with `Cache-Control: no-store`, 13 routes): `/`, `/web/index.html`, `/web/js/actions.js`, `/web/js/app.js`, `/web/js/formatters.js`, `/web/js/render-context.js`, `/web/js/render-flow.js`, `/web/js/render-header.js`, `/web/js/render-image.js`, `/web/js/render-overview.js`, `/web/js/render-pools.js`, `/web/js/state.js`, `/web/styles.css`
+**Static Web Routes** (`sidecars/cockpit/lib/runner.mjs` → `registerWebAssets`, all served with `Cache-Control: no-store` & `X-Content-Type-Options: nosniff`, 13 routes): `/`, `/web/index.html`, `/web/js/actions.js`, `/web/js/app.js`, `/web/js/formatters.js`, `/web/js/render-context.js`, `/web/js/render-flow.js`, `/web/js/render-header.js`, `/web/js/render-image.js`, `/web/js/render-overview.js`, `/web/js/render-pools.js`, `/web/js/state.js`, `/web/styles.css`
 
 ## 3. 持久化数据与外部只读数据源
 
@@ -75,24 +75,24 @@
 
 ## 4. 分层模块目录总览（自动统计行数）
 
-### Frontend (`sidecars/cockpit/web/`) — 12 files, 2551 lines
+### Frontend (`sidecars/cockpit/web/`) — 12 files, 2671 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
-| `sidecars/cockpit/web/index.html` | 30 | Top header, 5-tab navigation shell, and module script entry. |
-| `sidecars/cockpit/web/js/actions.js` | 195 | Frontend API actions for settings, Flow sync, peak pinning, calibration reset, and refresh. |
-| `sidecars/cockpit/web/js/app.js` | 238 | DOM diff renderer, tab router, event delegation, and polling loop. |
-| `sidecars/cockpit/web/js/formatters.js` | 147 | Token/duration/currency/credit formatters, countdown tags, and grid cell helpers. |
-| `sidecars/cockpit/web/js/render-context.js` | 231 | Context & Prompt Cache tab: 100-dot grid, cache hit analytics, and file sections. |
-| `sidecars/cockpit/web/js/render-flow.js` | 322 | Google Flow tab: synced credits, 1h/24h rolling caps, breaker status, and settings. |
-| `sidecars/cockpit/web/js/render-header.js` | 86 | Sticky header renderer for active model, pool pill, and 5h/weekly summary. |
-| `sidecars/cockpit/web/js/render-image.js` | 446 | Image Quota tab: anchor gauge, rolling schedules, calibration, and settings form. |
-| `sidecars/cockpit/web/js/render-overview.js` | 211 | Overview tab summary cards (Image, Pools, Context/Cache, Flow). |
-| `sidecars/cockpit/web/js/render-pools.js` | 210 | Model Quota Pools tab: Pool A/B windows, model list, and 7d weekly recovery. |
-| `sidecars/cockpit/web/js/state.js` | 41 | Shared reactive UI state, polling interval, and context category constants. |
+| `sidecars/cockpit/web/index.html` | 39 | Top header, 5-tab navigation shell, and classic modular script entries. |
+| `sidecars/cockpit/web/js/actions.js` | 209 | Frontend API actions for settings, Flow sync, peak pinning, calibration reset, and refresh. |
+| `sidecars/cockpit/web/js/app.js` | 239 | DOM diff renderer, tab router, event delegation, and polling loop. |
+| `sidecars/cockpit/web/js/formatters.js` | 173 | Token/duration/currency/credit formatters, countdown tags, and grid cell helpers. |
+| `sidecars/cockpit/web/js/render-context.js` | 243 | Context & Prompt Cache tab: 100-dot grid, cache hit analytics, and file sections. |
+| `sidecars/cockpit/web/js/render-flow.js` | 332 | Google Flow tab: synced credits, 1h/24h rolling caps, breaker status, and settings. |
+| `sidecars/cockpit/web/js/render-header.js` | 94 | Sticky header renderer for active model, pool pill, and 5h/weekly summary. |
+| `sidecars/cockpit/web/js/render-image.js` | 455 | Image Quota tab: anchor gauge, rolling schedules, calibration, and settings form. |
+| `sidecars/cockpit/web/js/render-overview.js` | 215 | Overview tab summary cards (Image, Pools, Context/Cache, Flow). |
+| `sidecars/cockpit/web/js/render-pools.js` | 223 | Model Quota Pools tab: Pool A/B windows, model list, and 7d weekly recovery. |
+| `sidecars/cockpit/web/js/state.js` | 55 | Shared reactive UI state, polling interval, and context category constants. |
 | `sidecars/cockpit/web/styles.css` | 394 | Cockpit dark theme variables, layout cards, grids, badges, and scrollbar styles. |
 
-### Node Backend (`sidecars/cockpit/`) — 10 files, 1967 lines
+### Node Backend (`sidecars/cockpit/`) — 10 files, 1970 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
@@ -100,7 +100,7 @@
 | `sidecars/cockpit/lib/pools_models.mjs` | 501 | Model role classification rules, quota summary parsing, and pool payload builder. |
 | `sidecars/cockpit/lib/pools_recovery.mjs` | 532 | 7-day quota snapshot ledger and weekly rolling recovery estimation. |
 | `sidecars/cockpit/lib/reports.mjs` | 206 | Python report runner caching, TTL management, and single-flight locks. |
-| `sidecars/cockpit/lib/runner.mjs` | 118 | Subprocess runner, Python discovery, workspace URI decoding, and static asset registration. |
+| `sidecars/cockpit/lib/runner.mjs` | 121 | Subprocess runner, Python discovery, workspace URI decoding, and static asset registration. |
 | `sidecars/cockpit/lib/settings.mjs` | 159 | Settings normalization/clamping and JSON stores for settings and quota history. |
 | `sidecars/cockpit/main.mjs` | 193 | Sidecar HTTP API server wiring static assets, pools, and Python report services. |
 | `sidecars/cockpit/package.json` | 5 | Node ESM package metadata for the cockpit sidecar. |
@@ -132,7 +132,7 @@
 | `sidecars/cockpit/pool_usage_report.py` | 384 | Read-only 7-day per-pool usage scanner over local conversation DBs. |
 | `sidecars/cockpit/quota_report.py` | 85 | CLI entrypoint and compatibility re-exports for `image_quota`. |
 
-### Tests (`tests/`) — 8 files, 2242 lines
+### Tests (`tests/`) — 8 files, 2540 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
@@ -143,9 +143,9 @@
 | `tests/test_project_index.py` | 54 | Drift guard verifying `PROJECT_INDEX.md` stays synchronized with the codebase. |
 | `tests/test_quota_report.py` | 849 | Unit tests for image quota scanning, schedules, calibration, and anchors. |
 | `tests/test_sidecar_routes.mjs` | 132 | Node tests for sidecar route wiring, settings, and report caching. |
-| `tests/test_web_assets.mjs` | 235 | Node tests for web asset collection, cache headers, and settings normalization. |
+| `tests/test_web_assets.mjs` | 533 | Node tests for web asset collection, cache headers, and settings normalization. |
 
-### Tooling & Metadata — 6 files, 788 lines
+### Tooling & Metadata — 6 files, 803 lines
 
 | File | Lines | Description |
 | --- | --- | --- |
@@ -154,16 +154,16 @@
 | `README.md` | 123 | Plugin overview, architecture summary, and installation/usage guide. |
 | `assets/logo.svg` | 17 | Plugin vector icon displayed in Antigravity UI. |
 | `plugin.json` | 21 | Antigravity plugin manifest describing name, version, and suggested prompts. |
-| `scripts/generate_index.py` | 587 | Automated `PROJECT_INDEX.md` generator and `--check` drift verifier. |
+| `scripts/generate_index.py` | 602 | Automated `PROJECT_INDEX.md` generator and `--check` drift verifier. |
 
-**Total Tracked Source & Doc Files**: 56 files, 13277 lines (excluding `PROJECT_INDEX.md`).
+**Total Tracked Source & Doc Files**: 56 files, 13713 lines (excluding `PROJECT_INDEX.md`).
 
 ## 5. 符号级精确行号索引（自动提取）
 
 ### Python Modules (`sidecars/cockpit/**/*.py` & `scripts/*.py`)
 
-- **`scripts/generate_index.py`** (587L)
-  - Symbols: `def count_lines` (L250-L252), `def iter_repo_files` (L255-L267), `def extract_http_routes` (L270-L281), `def collect_static_web_routes` (L284-L295), `def classify_group` (L298-L310), `def is_pure_py_facade` (L313-L323), `def extract_python_symbols` (L326-L351), `def extract_js_symbols` (L354-L381), `def render_table` (L384-L392), `def generate_markdown` (L395-L547), `def main` (L550-L583)
+- **`scripts/generate_index.py`** (602L)
+  - Symbols: `def count_lines` (L250-L252), `def iter_repo_files` (L255-L267), `def extract_http_routes` (L270-L281), `def collect_static_web_routes` (L284-L295), `def classify_group` (L298-L310), `def is_pure_py_facade` (L313-L323), `def extract_python_symbols` (L326-L351), `def extract_js_symbols` (L354-L396), `def render_table` (L399-L407), `def generate_markdown` (L410-L562), `def main` (L565-L598)
   - Constants: `REPO_ROOT` (L21), `INDEX_PATH` (L22), `EXCLUDED_DIRS` (L23), `EXCLUDED_FILES` (L24), `ROUTING_ROWS` (L26), `DATA_FILES` (L174), `READONLY_SOURCES` (L184), `FILE_DESCRIPTIONS` (L192)
 - **`sidecars/cockpit/context_parser/__init__.py`** (149L): Subpackage facade / re-exports.
 - **`sidecars/cockpit/context_parser/collector.py`** (534L)
@@ -220,7 +220,7 @@
   - Exports: `export const WINDOW_7D_SEC` (L3)
 - **`sidecars/cockpit/lib/reports.mjs`** (206L)
   - Functions: `export function createReportsService` (L9)
-- **`sidecars/cockpit/lib/runner.mjs`** (118L)
+- **`sidecars/cockpit/lib/runner.mjs`** (121L)
   - Functions: `export function runCommand` (L21), `export async function findPython` (L38), `export function workspacePath` (L54), `export function fileStamp` (L62), `export function collectWebAssets` (L71), `export function registerWebAssets` (L104)
   - Exports: `export const CONTENT_TYPES` (L12)
 - **`sidecars/cockpit/lib/settings.mjs`** (159L)
@@ -228,24 +228,24 @@
   - Exports: `export const DEFAULT_SETTINGS` (L12)
 - **`sidecars/cockpit/main.mjs`** (193L): Sidecar bootstrap & HTTP API routes: `GET /api/dashboard` (L85), `POST /api/settings` (L111), `POST /api/flow/sync-credits` (L133), `POST /api/calibration/pin` (L151), `POST /api/calibration/reset` (L171), `GET /api/report` (L183)
 - **`sidecars/cockpit/pools_logic.mjs`** (21L): Backward-compatible re-export facade.
-- **`sidecars/cockpit/web/js/actions.js`** (195L)
-  - Functions: `export function setActionsCallbacks` (L6), `export async function copyText` (L10), `export async function saveSettings` (L30), `export async function saveFlowSettings` (L61), `export async function syncFlowCredits` (L86), `export async function pinPeak` (L115), `export async function resetCalibration` (L144), `export async function refresh` (L167)
-- **`sidecars/cockpit/web/js/app.js`** (238L)
-  - Functions: `export function render` (L14), `export function setTab` (L85)
-- **`sidecars/cockpit/web/js/formatters.js`** (147L)
-  - Functions: `export function fmtTok` (L8), `export function fmtClock` (L15), `export function fmtHM` (L21), `export function fmtUsd` (L28), `export function fmtDateTime` (L35), `export function fmtMD` (L42), `export function fmtDuration` (L49), `export function cdSpan` (L62), `export function fmtElapsed` (L67), `export function elapsedTextWithHint` (L79), `export function elapsedSpan` (L87), `export function tickCountdowns` (L94), `export function healthCls` (L112), `export function barFillColor` (L118), `export function gridCells` (L124), `export function splitPath` (L138), `export function fmtCredits` (L143)
-  - Exports: `export const nowSec` (L3), `export const esc` (L4)
-- **`sidecars/cockpit/web/js/render-context.js`** (231L)
-  - Functions: `export function cacheStatusMeta` (L6), `export function cacheTurnStatusLabel` (L24), `export function renderCacheOverviewStrip` (L34), `export function renderCacheCard` (L62), `export function renderFileList` (L135), `export function renderContext` (L147)
-- **`sidecars/cockpit/web/js/render-flow.js`** (322L)
-  - Functions: `export function flowStatusMeta` (L6), `export function renderFlowOverviewCard` (L17), `export function renderFlowSchedule` (L98), `export function renderFlow` (L115)
-- **`sidecars/cockpit/web/js/render-header.js`** (86L)
-  - Functions: `export function updateHeader` (L5)
-- **`sidecars/cockpit/web/js/render-image.js`** (446L)
-  - Functions: `export function imgStatusMeta` (L6), `export function eventTagInfo` (L33), `export function renderImage` (L42)
-- **`sidecars/cockpit/web/js/render-overview.js`** (211L)
-  - Functions: `export function renderOverview` (L12)
-- **`sidecars/cockpit/web/js/render-pools.js`** (210L)
-  - Functions: `export function weeklyRecSourceMeta` (L5), `export function renderPoolWeeklyRecoveryOverview` (L14), `export function renderPoolWeeklyRecoveryDetail` (L39), `export function poolWindowsList` (L90), `export function winResetHtml` (L110), `export function renderPools` (L124)
-- **`sidecars/cockpit/web/js/state.js`** (41L)
-  - Exports: `export const POLL_MS` (L1), `export const SEG_COLORS` (L2), `export const CAT_COLOR` (L3), `export const CAT_LABEL` (L11), `export const CTX_GROUPS` (L19), `export const state` (L25)
+- **`sidecars/cockpit/web/js/actions.js`** (209L)
+  - Functions: `function setActionsCallbacks` (L8), `async function copyText` (L12), `async function saveSettings` (L32), `async function saveFlowSettings` (L63), `async function syncFlowCredits` (L88), `async function pinPeak` (L117), `async function resetCalibration` (L146), `async function refresh` (L169)
+- **`sidecars/cockpit/web/js/app.js`** (239L)
+  - Functions: `function render` (L11), `function setTab` (L82)
+- **`sidecars/cockpit/web/js/formatters.js`** (173L)
+  - Functions: `function fmtTok` (L11), `function fmtClock` (L18), `function fmtHM` (L24), `function fmtUsd` (L31), `function fmtDateTime` (L38), `function fmtMD` (L45), `function fmtDuration` (L52), `function cdSpan` (L65), `function fmtElapsed` (L70), `function elapsedTextWithHint` (L82), `function elapsedSpan` (L90), `function tickCountdowns` (L97), `function healthCls` (L115), `function barFillColor` (L121), `function gridCells` (L127), `function splitPath` (L141), `function fmtCredits` (L146)
+  - Exports: `const nowSec` (L6), `const esc` (L7)
+- **`sidecars/cockpit/web/js/render-context.js`** (243L)
+  - Functions: `function cacheStatusMeta` (L8), `function cacheTurnStatusLabel` (L26), `function renderCacheOverviewStrip` (L36), `function renderCacheCard` (L64), `function renderFileList` (L137), `function renderContext` (L149)
+- **`sidecars/cockpit/web/js/render-flow.js`** (332L)
+  - Functions: `function flowStatusMeta` (L8), `function renderFlowOverviewCard` (L19), `function renderFlowSchedule` (L100), `function renderFlow` (L117)
+- **`sidecars/cockpit/web/js/render-header.js`** (94L)
+  - Functions: `function updateHeader` (L8)
+- **`sidecars/cockpit/web/js/render-image.js`** (455L)
+  - Functions: `function imgStatusMeta` (L8), `function eventTagInfo` (L35), `function renderImage` (L44)
+- **`sidecars/cockpit/web/js/render-overview.js`** (215L)
+  - Functions: `function renderOverview` (L11)
+- **`sidecars/cockpit/web/js/render-pools.js`** (223L)
+  - Functions: `function weeklyRecSourceMeta` (L8), `function renderPoolWeeklyRecoveryOverview` (L17), `function renderPoolWeeklyRecoveryDetail` (L42), `function poolWindowsList` (L93), `function winResetHtml` (L113), `function renderPools` (L127)
+- **`sidecars/cockpit/web/js/state.js`** (55L)
+  - Exports: `const POLL_MS` (L4), `const SEG_COLORS` (L5), `const CAT_COLOR` (L6), `const CAT_LABEL` (L14), `const CTX_GROUPS` (L22), `const state` (L28), `const $` (L44)

@@ -109,7 +109,10 @@ export function registerWebAssets(app, webDir, ResponseClass) {
       readFileSync(entry.filePath, 'utf8'),
       {
         contentType: entry.contentType,
-        headers: { 'Cache-Control': 'no-store' },
+        headers: {
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
       },
     ));
     routes.push(entry.route);
