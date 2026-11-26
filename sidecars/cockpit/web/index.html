@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配额与上下文</title>
+<script src="/preload.js"></script>
+<link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+<header>
+  <div class="hbar">
+    <span id="live-dot" class="live" title="实时状态"></span>
+    <span id="hdr-model" class="hmodel">加载中…</span>
+    <span id="hdr-pool" class="pill click" style="display:none" title="查看模型配额池"></span>
+    <button id="btn-refresh" title="强制刷新全部数据">刷新</button>
+  </div>
+  <div id="hdr-quota" class="hquota" style="display:none" title="当前模型所属池的双窗口额度（点击查看详情）"></div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="overview">总览</button>
+    <button class="tab" data-tab="image">生图 <span id="tab-img-dot" class="tdot" style="display:none"></span></button>
+    <button class="tab" data-tab="pools">池子</button>
+    <button class="tab" data-tab="context">上下文</button>
+    <button class="tab" data-tab="flow">Flow <span id="tab-flow-dot" class="tdot" style="display:none"></span></button>
+  </nav>
+</header>
+<main id="view"><p class="empty">正在读取配额与上下文数据…</p></main>
+<script type="module" src="/web/js/app.js"></script>
+</body>
+</html>
