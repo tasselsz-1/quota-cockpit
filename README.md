@@ -2,7 +2,7 @@
 
 > Antigravity 2.0 侧边栏四合一实时监控插件（Sidecar AUX Pane）——零模型 Token 消耗、零外部 npm 依赖、严格只读本地数据。
 >
-> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5h & 7d Rolling Image Generation Quota**, **Dual Model Quota Pools (5h + Weekly Rolling Recovery Forecast)**, **Exact Conversation Context & Prompt Cache Hit Analytics**, and **Google Flow Video Quota & Anti-Throttle Monitor** in one dashboard.
+> A zero-token, zero-dependency Antigravity 2.0 side-pane plugin combining **5h & 7d Rolling Image Generation Quota**, **Dual Model Quota Pools (5h + Weekly Rolling Recovery Forecast)**, **Exact Conversation Context & Prompt Cache Hit Analytics**, and **Google Flow Cross-Modal (Video + 0-Credit Image/Upscale) Quota & 10m WAF Monitor** in one dashboard.
 
 > **快速开发与排查导航**：本项目已完成全量模块化拆分，请优先查阅 [`PROJECT_INDEX.md`](./PROJECT_INDEX.md)（按改动意图秒定位到对应小文件与函数行号，无需通读整文件；改动后运行 `python scripts/generate_index.py` 刷新索引）。
 
@@ -27,11 +27,11 @@
 - **对话步数监控**：紧邻 Prompt 缓存命中下方实时展示对话原生 `steps` 步数（自动区分压缩后本段步数与整场总步数，细分用户提问 / 模型调用 / 工具执行 / 系统 / 压缩次数）。
 - 支持一键复制纯文本报告（含 Prompt 缓存与步数摘要），便于定位长会话上下文膨胀或配合 `/compact` 瘦身。
 
-### 4. Google Flow 生视频配额 · 账号积分 + 模型可生估算 + 1h/24h 防风控滚轴
-- **毫秒级纯本地零风控监控（`flow_report.py` / `flow_quota/`）**：日常刷新严格只读本地 `gflow-cli` SQLite 数据库（`gflow.db?mode=ro`）与可选防限流账本（`~/.gemini/gflow_traffic_ledger.json`），零网络请求、零浏览器启动、零 Profile 锁争抢；未安装 `gflow-cli` 时优雅降级。
-- **手动按需同步真实积分 + 同步后自动扣减**：因代理环境下 `gflow credits` 会回退浏览器读取，为防止后台高频轮询触发风控，真实余额采用一键手动同步（`POST /api/flow/sync-credits`，自动检测活跃 Profile 锁避让冲突并落盘 `flow-credits-cache.json`）；两次同步之间依据本地账本自动扣除新增积分，实时估算当前余额与净可用预算（默认扣除 `100` 积分安全底线）。
-- **主力视频模型可生段数与退役隔离**：按净可用积分换算 `Veo 3.1 Lite`（~10 积分）、`Omni Flash 1.2`（~20 积分）、`Veo 3.1 Lite LP`（~10 积分）剩余可生成段数（标注 `1080p` 超分免费），并将 `2026-12-05` 即将退役模型隔离折叠。
-- **1h / 24h 防限流滚轴回血与熔断警示**：实时监控 1h 频次、24h 频次、24h 积分预算、最小间隔冷却（支持在面板自定义阈值）及滚轴释放倒计时；命中 WAF 人工熔断或 429 定时冷却时总览与详情页高亮提醒；无全局账本时自动降级由 `gflow.db` 驱动，同时支持联动工作区可选的 `flow_run_state.json`。
+### 4. Google Flow 生视频/生图配额 · 10m 跨模态 WAF 令牌墙 + 0 积分生图四日池 + 账号积分与 24h 视频软预算
+- **毫秒级纯本地零风控监控（`flow_report.py` / `flow_quota/`）**：日常刷新严格只读本地 `v2` 共享账本（`~/.gemini/gflow_traffic_ledger.json`）、跨模态单飞锁（`~/.gemini/gflow_single_flight.lock`）与 `gflow-cli` SQLite 数据库（`gflow.db?mode=ro`），零网络请求、零浏览器启动、零 Profile 锁争抢；未安装 `gflow-cli` 时优雅降级。
+- **10m 跨模态 WAF 令牌墙（核心控流）**：视频提交、生图提交（含 4x）与 2K/4K 放大合并计算 10 分钟 reCAPTCHA 令牌（默认 `8` 次，非高峰可配置上限 `10`；UTC 14:00–17:00 / 北京时间 22:00–01:00 高峰期或 24h 内发生 WAF 后的恢复期自动压回 `≤ 6`；`character` 建卡与本地未发包失败 `0 token` 不占窗）；1h 人为上限默认关闭（`0`），由 10m WAF 墙 + 跨模态最小间隔（`35s`）+ 生图 Start-to-Start 节拍（`65/75/80s`）接管。
+- **0 积分生图与 2K/4K 放大四日池 + 80 次大休**：按 Ultra 5x 日额独立追踪 `Nano Banana Pro (500)`、`Nano Banana 2.1 / 2 Lite 共享池 (1,000)`、`2K 放大 (200)`、`4K 放大 (200)`（4x 生图按 `quota_units=4` 累计），支持单池 `model_breakers` 独立隔离告警与日累计 `80` 次防热大休提醒。
+- **手动按需同步真实积分 + 24h 视频软预算 & 退役隔离**：因代理环境下 `gflow credits` 会回退浏览器读取，真实余额采用一键手动同步（`POST /api/flow/sync-credits`，自动检测活跃 Profile 锁避让冲突并落盘 `flow-credits-cache.json`）；两次同步之间依据本地账本自动扣点估算净可用余额（默认保留 `100` 积分底线），换算 `Veo 3.1 Lite`（~10 积分）、`Omni Flash 1.2`（~20 积分）、`Veo 3.1 Lite LP`（~10 积分）剩余可生成段数（标注 `1080p` 超分免费），并将 `2026-12-05` 即将退役模型隔离折叠；24h 视频软预算默认 `36` 次 / `600` 积分；命中全局 WAF/429 熔断或单池隔离时高亮提醒；无全局账本时自动降级由 `gflow.db` 驱动，同时支持联动工作区可选的 `flow_run_state.json`、`flow_project_index.json`（50 段项目轮换）与 `flow_image_state.json`（100 tiles 项目轮换）。
 
 ## 环境要求
 

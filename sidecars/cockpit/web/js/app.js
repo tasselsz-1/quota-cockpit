@@ -59,11 +59,16 @@
       iq.recent_events?.[0]?.ts,
       fq.error, fq.available, fq.health, fq.status_label,
       fcr.synced, fcr.synced_at, fcr.estimated_total, fcr.spent_since_sync, fcr.spendable, fcr.last_error, fcr.profile_busy,
-      frl.hour_used, frl.hour_limit, frl.day_used, frl.day_limit, frl.day_credits_used, frl.day_credits_limit,
-      frl.hour_next_recover_ts, frl.day_next_recover_ts, frl.min_gap_wait_sec, frl.untracked_db_24h,
+      frl.waf_window_tokens, frl.waf_effective_limit, frl.waf_next_recover_ts, frl.is_peak_hours, frl.recent_waf_recovery,
+      frl.hour_enabled, frl.hour_used, frl.hour_limit, frl.day_used, frl.day_limit, frl.day_credits_used, frl.day_credits_limit,
+      frl.hour_next_recover_ts, frl.day_next_recover_ts, frl.min_gap_wait_sec, frl.s2s_wait_sec,
+      frl.untracked_db_24h, frl.untracked_db_image_24h,
+      fq.image_quota?.total_units_24h, fq.image_quota?.daily_image_submits, fq.image_quota?.heat_rest_due,
+      fq.image_quota?.active_model_breaker_count,
+      fq.locks?.single_flight?.active,
       fbr.open, fbr.requires_manual_reset, fbr.until_ts, fbr.reason,
-      fq.usage?.window_7d?.total, fq.usage?.window_30d?.total,
-      fq.recent_events?.[0]?.ts, (fq.workspace_runs || []).map((r) => [r.path, r.completed, r.updated_at]),
+      fq.usage?.window_7d?.total, fq.usage?.window_30d?.total, fq.usage?.window_30d?.image_total,
+      fq.recent_events?.[0]?.ts, (fq.workspace_runs || []).map((r) => [r.path, r.completed, r.updated_at, r.project_rotation?.used]),
       ctx.updatedAt, ctx.error, ctx.used_tokens,
     ]);
     if (!force && key === state.lastKey) return;
@@ -115,9 +120,10 @@
     const flowResetBtn = e.target.closest('#btn-flow-reset-default');
     if (flowResetBtn) {
       saveFlowSettings({
-        flowMaxPerHour: 6,
-        flowMaxPerDay: 20,
-        flowMaxDailyCredits: 400,
+        flowMaxRecaptcha10m: 8,
+        flowMaxPerHour: 0,
+        flowMaxPerDay: 36,
+        flowMaxDailyCredits: 600,
         flowMinCredits: 100,
         flowMinGapSec: 35,
       });
@@ -184,12 +190,18 @@
     const flowForm = e.target.closest('#flow-settings-form');
     if (flowForm) {
       e.preventDefault();
-      const flowMaxPerHour = Math.max(1, Number(flowForm.elements.flowMaxPerHour.value) || 6);
-      const flowMaxPerDay = Math.max(flowMaxPerHour, Number(flowForm.elements.flowMaxPerDay.value) || 20);
-      const flowMaxDailyCredits = Math.max(10, Number(flowForm.elements.flowMaxDailyCredits.value) || 400);
-      const flowMinCredits = Math.max(0, Number(flowForm.elements.flowMinCredits.value) || 0);
-      const flowMinGapSec = Math.max(0, Number(flowForm.elements.flowMinGapSec.value) || 0);
+      const parseNum = (el, fallback) => {
+        const v = Number(el?.value);
+        return Number.isFinite(v) ? Math.round(v) : fallback;
+      };
+      const flowMaxRecaptcha10m = Math.max(1, Math.min(10, parseNum(flowForm.elements.flowMaxRecaptcha10m, 8)));
+      const flowMaxPerHour = Math.max(0, Math.min(200, parseNum(flowForm.elements.flowMaxPerHour, 0)));
+      const flowMaxPerDay = Math.max(Math.max(1, flowMaxPerHour), parseNum(flowForm.elements.flowMaxPerDay, 36));
+      const flowMaxDailyCredits = Math.max(10, parseNum(flowForm.elements.flowMaxDailyCredits, 600));
+      const flowMinCredits = Math.max(0, parseNum(flowForm.elements.flowMinCredits, 100));
+      const flowMinGapSec = Math.max(0, parseNum(flowForm.elements.flowMinGapSec, 35));
       saveFlowSettings({
+        flowMaxRecaptcha10m,
         flowMaxPerHour,
         flowMaxPerDay,
         flowMaxDailyCredits,

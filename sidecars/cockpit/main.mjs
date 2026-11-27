@@ -4,9 +4,11 @@
 // 1. Image Generation Quota (`quota_report.py`): 5h rolling/429-locked window,
 //    24h/7d stats, EOF tracking, empirical 429 ceiling calibration, and
 //    optional workspace `api_call_ledger.json` linking.
-// 2. Google Flow Video Quota (`flow_report.py`): local zero-network rolling
-//    1h/24h traffic caps, daily credit budget, circuit breaker alerts, model
-//    segment estimates, gflow.db 30d history, and on-demand manual credit sync.
+// 2. Google Flow Cross-Modal Quota (`flow_report.py`): local zero-network v2
+//    shared traffic ledger (10m combined WAF token wall with peak/recovery
+//    clamping, 0-credit daily image/upscale pools, 80-submit heat-rest, 24h
+//    video soft budget, global + per-model breakers, single-flight lock,
+//    gflow.db 30d history, project rotation scans, and on-demand credit sync).
 // 3. Live Dual Quota Pools (`GetAvailableModels` + `RetrieveUserQuotaSummary` RPCs):
 //    Pool A (Google Gemini) vs Pool B (Claude / OpenAI) 5-hour & weekly remaining %,
 //    reset times, active model pool highlighting, and cross-pool routing advice.

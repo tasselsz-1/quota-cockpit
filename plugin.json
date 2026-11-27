@@ -1,8 +1,8 @@
 {
   "name": "quota-cockpit",
   "displayName": "配额与上下文",
-  "description": "侧边栏四合一实时监控台：生图配额（5h/7d双滚轴分段回血/官方Token与均图估算/30天自学习水位带/峰值固定/可选工作区账本联动）、当前模型配额池（池A Gemini / 池B Claude 的 5h 与周额度双窗口实时余量及7天滚动回血预测）、当前会话精确上下文（Prompt 缓存命中与对话步数监控），以及 Google Flow 生视频配额（账号积分按需同步与同步后自动扣减/Veo与Omni可生段数/1h与24h防限流滚轴回血/WAF与429熔断告警/只读gflow.db统计）。零 Token 消耗。",
-  "version": "1.6.2",
+  "description": "侧边栏四合一实时监控台：生图配额（5h/7d双滚轴分段回血/官方Token与均图估算/30天自学习水位带/峰值固定/可选工作区账本联动）、当前模型配额池（池A Gemini / 池B Claude 的 5h 与周额度双窗口实时余量及7天滚动回血预测）、当前会话精确上下文（Prompt 缓存命中与对话步数监控），以及 Google Flow 生视频/生图配额（10m跨模态WAF令牌墙与高峰/恢复期自动收紧/0积分生图与2K·4K放大四日池及80次防热休息/账号积分按需同步与自动扣减/Veo与Omni可生段数/24h视频软预算/全局与单池熔断告警/只读gflow.db统计）。零 Token 消耗。",
+  "version": "1.6.3",
   "author": {
     "name": "tasselsz-1",
     "url": "https://github.com/tasselsz-1"

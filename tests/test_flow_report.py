@@ -280,6 +280,231 @@ class TestFlowReport(unittest.TestCase):
             self.assertEqual(runs[0]["counts"]["uncertain"], 1)
             self.assertEqual(runs[0]["credits_used"], 30.0)
 
+    def test_v2_cross_modal_waf_window_image_pools_and_unsubmitted_exclusion(self) -> None:
+        # 2027-01-15T08:00:00Z (non-peak UTC 08:00)
+        now = 1_800_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            gflow_dir = tdir / "gflow"
+            gflow_dir.mkdir()
+            iso = lambda offset: fr.datetime.fromtimestamp(now + offset, tz=fr.timezone.utc).isoformat()
+            _create_mock_gflow_db(
+                gflow_dir,
+                operations=[
+                    ("op_v1", "demo", "video i2v", "i2v", "veo_3_1_lite", "16:9", "succeeded", iso(-300), iso(-250), "", "", None),
+                    ("op_i1", "demo", "image t2i", "t2i", "NARWHAL", "16:9", "succeeded", iso(-200), iso(-170), "", "", None),
+                    ("op_u1", "demo", "image upscale", "upscale", "4k", "", "succeeded", iso(-100), iso(-80), "", "", None),
+                ],
+            )
+            ledger_path = tdir / "gflow_traffic_ledger.json"
+            events = [
+                # 5 older video events in 1h (>10m ago) to prove hour cap disabled (max_per_hour=0)
+                {"ts": now - 2400, "action": "i2v", "episode": "ep01", "segment": "seg_01", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 2100, "action": "i2v", "episode": "ep01", "segment": "seg_02", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 1800, "action": "i2v", "episode": "ep01", "segment": "seg_03", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 1500, "action": "i2v", "episode": "ep01", "segment": "seg_04", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 1200, "action": "i2v", "episode": "ep01", "segment": "seg_05", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                # Within 10m: i2v (1 tok) + image_t2i 4x (1 tok, 4 quota_units) + image_upscale 4k (1 tok, 1 quota_unit)
+                {"ts": now - 300, "submit_start_ts": now - 310, "action": "i2v", "episode": "ep01", "segment": "seg_06", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 200, "submit_start_ts": now - 215, "action": "image_t2i", "episode": "ep01", "segment": "img_01", "model": "nano2", "quota_pool": "nano2_shared", "quota_units": 4, "credits": 0.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                {"ts": now - 100, "submit_start_ts": now - 105, "action": "image_upscale", "episode": "ep01", "segment": "img_01", "model": "4k", "quota_pool": "image_upscale_4k", "quota_units": 1, "credits": 0.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1},
+                # Character action (0 WAF tokens) + pre-submit local failure (0 WAF tokens, excluded)
+                {"ts": now - 90, "action": "character", "episode": "ep01", "segment": "hero", "credits": 0.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 0},
+                {"ts": now - 10, "action": "image_t2i", "episode": "ep01", "segment": "img_02", "model": "nano-pro", "quota_pool": "nano_pro", "quota_units": 4, "credits": 0.0, "outcome": "LOCAL_PRECHECK_FAIL", "exit_code": 2, "recaptcha_tokens": 0},
+            ]
+            ledger_path.write_text(json.dumps({
+                "version": 2,
+                "breaker": {"active": False, "requires_manual_reset": False, "until_ts": 0.0, "reason": ""},
+                "model_breakers": {},
+                "last_waf_ts": 0.0,
+                "last_heat_rest_ts": 0.0,
+                "events": events,
+            }), encoding="utf-8")
+
+            rep = fr.build_report(
+                ledger_path=ledger_path,
+                gflow_dir=gflow_dir,
+                credits_cache_path=tdir / "missing_cache.json",
+                now=now,
+                gflow_bin_override="",
+            )
+            self.assertEqual(rep["version"], 2)
+            self.assertEqual(rep["health"], "ok")
+            self.assertFalse(rep["rolling"]["hour_enabled"])
+            self.assertEqual(rep["rolling"]["hour_limit"], 0)
+            self.assertEqual(rep["rolling"]["waf_window_tokens"], 3)
+            self.assertEqual(rep["rolling"]["waf_effective_limit"], 8)
+            self.assertEqual(rep["rolling"]["day_used"], 7)
+            self.assertEqual(rep["rolling"]["day_character_used"], 1)
+            self.assertEqual(rep["rolling"]["min_gap_wait_sec"], 0)
+            pools = {p["id"]: p for p in rep["image_quota"]["pools"]}
+            self.assertEqual(pools["nano2_shared"]["used"], 4)
+            self.assertEqual(pools["image_upscale_4k"]["used"], 1)
+            self.assertEqual(pools["nano_pro"]["used"], 0)
+            self.assertEqual(rep["image_quota"]["daily_image_submits"], 1)
+            self.assertFalse(rep["image_quota"]["heat_rest_due"])
+            img_models = {m["model"]: m for m in rep["usage"]["by_image_model_30d"]}
+            self.assertEqual(img_models["nano2"]["ok"], 1)
+            self.assertEqual(img_models["nano2"]["label"], "Nano Banana 2.1")
+
+    def test_peak_hours_waf_recovery_clamp_and_explicit_hour_cap(self) -> None:
+        # 2027-01-15T15:00:00Z -> UTC 15:00 (peak window UTC 14:00-17:00)
+        peak_now = 1_800_025_200.0
+        non_peak_now = 1_800_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            ledger_path = tdir / "ledger.json"
+            cache_path = tdir / "cache.json"
+
+            # 1. Peak hours clamps 8 -> 6 and 6 tokens triggers critical (10m 满窗)
+            six_events = [
+                {"ts": peak_now - 60 * (i + 1), "action": "image_t2i", "model": "nano2", "quota_units": 4, "credits": 0.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1}
+                for i in range(6)
+            ]
+            ledger_path.write_text(json.dumps({"version": 2, "breaker": {}, "events": six_events}), encoding="utf-8")
+            rep_peak = fr.build_report(ledger_path, tdir / "nogflow", cache_path, now=peak_now, max_recaptcha_10m=8)
+            self.assertTrue(rep_peak["rolling"]["is_peak_hours"])
+            self.assertEqual(rep_peak["rolling"]["waf_effective_limit"], 6)
+            self.assertEqual(rep_peak["health"], "critical")
+            self.assertEqual(rep_peak["status_label"], "10m 满窗")
+
+            # 2. Non-peak + recent WAF via last_waf_ts=0 fallback (exit_code==10 within 24h) clamps 8 -> 6
+            ledger_path.write_text(json.dumps({
+                "version": 2,
+                "breaker": {},
+                "last_waf_ts": 0.0,
+                "events": [
+                    {"ts": non_peak_now - 3600, "action": "i2v", "credits": 0.0, "outcome": "WAF_403", "exit_code": 10, "recaptcha_tokens": 1},
+                ],
+            }), encoding="utf-8")
+            rep_rec = fr.build_report(ledger_path, tdir / "nogflow", cache_path, now=non_peak_now, max_recaptcha_10m=8)
+            self.assertFalse(rep_rec["rolling"]["is_peak_hours"])
+            self.assertTrue(rep_rec["rolling"]["recent_waf_recovery"])
+            self.assertEqual(rep_rec["rolling"]["waf_effective_limit"], 6)
+
+            # 3. Explicit max_per_hour=5 enforces hourly critical
+            five_video = [
+                {"ts": non_peak_now - 1000 - i * 100, "action": "i2v", "credits": 10.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1}
+                for i in range(5)
+            ]
+            ledger_path.write_text(json.dumps({"version": 2, "breaker": {}, "events": five_video}), encoding="utf-8")
+            rep_hr = fr.build_report(ledger_path, tdir / "nogflow", cache_path, now=non_peak_now, max_per_hour=5)
+            self.assertTrue(rep_hr["rolling"]["hour_enabled"])
+            self.assertEqual(rep_hr["health"], "critical")
+            self.assertEqual(rep_hr["status_label"], "已达限流")
+
+    def test_model_breakers_heat_rest_and_extended_event_tags(self) -> None:
+        now = 1_800_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            ledger_path = tdir / "ledger.json"
+            cache_path = tdir / "cache.json"
+            # 72 OK + 8 tag-case submitted image events = exact 80 submits across 24h (>10m ago) -> heat_rest_due True
+            events = [
+                {"ts": now - 900 - i * 600, "action": "image_t2i", "model": "nano2", "quota_pool": "nano2_shared", "quota_units": 4, "credits": 0.0, "outcome": "OK", "exit_code": 0, "recaptcha_tokens": 1}
+                for i in range(72)
+            ]
+            # Extended outcome tags (use recaptcha_tokens=1 on older events >10m ago so 10m stays clear)
+            tag_cases = [
+                ("WAF_403", 10, "WAF"),
+                ("AUTH_LOCK", 10, "WAF"),
+                ("RATE_LIMIT", 11, "429"),
+                ("MODEL_QUOTA_EXCEEDED", 12, "POOL"),
+                ("CONTENT_POLICY", 13, "POL"),
+                ("SAME_IMAGE_SUSPECT", 0, "DUP"),
+                ("TRANSPORT_TIMEOUT", 14, "TMO"),
+                ("HARD_BLOCK", 15, "BLK"),
+            ]
+            for idx, (outcome, code, _tag) in enumerate(tag_cases):
+                events.append({
+                    "ts": now - 700 - idx,
+                    "action": "image_t2i",
+                    "model": "nano-pro",
+                    "quota_pool": "nano_pro",
+                    "quota_units": 4,
+                    "credits": 0.0,
+                    "outcome": outcome,
+                    "exit_code": code,
+                    "recaptcha_tokens": 1,
+                })
+            ledger_path.write_text(json.dumps({
+                "version": 2,
+                "breaker": {"active": False},
+                "model_breakers": {
+                    "nano_pro": {"active": True, "until_ts": now + 1800, "reason": "daily pool exhausted"},
+                    "nano2_shared": {"active": True, "until_ts": now - 10, "reason": "expired"},
+                },
+                "last_heat_rest_ts": now - 60000,
+                "events": events,
+            }), encoding="utf-8")
+
+            rep = fr.build_report(ledger_path, tdir / "nogflow", cache_path, now=now)
+            self.assertEqual(rep["health"], "warning")
+            self.assertEqual(rep["status_label"], "单池隔离")
+            self.assertEqual(len(rep["model_breakers"]), 1)
+            self.assertIn("nano_pro", rep["model_breakers"])
+            self.assertEqual(rep["model_breakers"]["nano_pro"]["pool"], "nano_pro")
+            self.assertTrue(rep["image_quota"]["heat_rest_due"])
+            self.assertGreaterEqual(rep["image_quota"]["daily_image_submits"], 80)
+
+            tags_by_outcome = {ev["outcome"]: ev["tag"] for ev in rep["recent_events"]}
+            for outcome, _code, expected_tag in tag_cases:
+                self.assertEqual(tags_by_outcome.get(outcome), expected_tag)
+
+    def test_single_flight_lock_and_workspace_project_rotation_scan(self) -> None:
+        now = 1_800_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            # Single-flight lock: stale PID -> False, live parent PID -> True
+            lock_path = ws / "gflow_single_flight.lock"
+            lock_path.write_text(json.dumps({"pid": 99999999, "cmd": "image"}), encoding="utf-8")
+            sf0 = fr.inspect_single_flight_lock(lock_path, now)
+            self.assertFalse(sf0["active"])
+            ppid = os.getppid()
+            if ppid > 0 and ppid != os.getpid() and fr.is_pid_alive(ppid):
+                lock_path.write_text(json.dumps({"pid": ppid, "cmd": "image_t2i"}), encoding="utf-8")
+                sf1 = fr.inspect_single_flight_lock(lock_path, now)
+                self.assertTrue(sf1["active"])
+                self.assertIn(str(ppid), sf1["detail"])
+
+            # Video run + flow_project_index.json (50-seg rotation)
+            vid_dir = ws / "work" / "ep02"
+            vid_dir.mkdir(parents=True)
+            (vid_dir / "flow_run_state.json").write_text(json.dumps({
+                "segments": {"s01": {"status": "DONE", "credits_used": 10}},
+                "updated_at": "2026-11-27T10:00:00+08:00",
+            }), encoding="utf-8")
+            (vid_dir / "flow_project_index.json").write_text(json.dumps({
+                "active_project_id": "proj-v1",
+                "projects": {"proj-v1": {"submitted_count": 32}},
+            }), encoding="utf-8")
+
+            # Image run + flow_image_state.json (100-tile rotation)
+            img_dir = ws / "work" / "ep02_img"
+            img_dir.mkdir(parents=True)
+            (img_dir / "flow_image_state.json").write_text(json.dumps({
+                "jobs": {
+                    "img_01": {"status": "DONE", "project_id": "proj-i1", "count": 4},
+                    "img_02": {"status": "DONE", "upscaled_scale": "4k", "project_id": "proj-i1", "count": 4},
+                    "img_03": {"status": "FAILED", "project_id": "proj-i1", "count": 4},
+                },
+                "flow_project_id": "proj-i1",
+                "flow_project_tiles": 76,
+                "flow_project_history": [{"id": "proj-i0", "tiles": 100}],
+                "updated_at": "2026-11-27T11:00:00+08:00",
+            }), encoding="utf-8")
+
+            runs = fr.scan_workspace_flow_runs(str(ws))
+            by_kind = {r["kind"]: r for r in runs}
+            self.assertIn("video", by_kind)
+            self.assertIn("image", by_kind)
+            self.assertEqual(by_kind["video"]["project_rotation"]["used"], 32)
+            self.assertEqual(by_kind["video"]["project_rotation"]["limit"], 50)
+            self.assertEqual(by_kind["image"]["completed"], 2)
+            self.assertEqual(by_kind["image"]["project_rotation"]["used"], 76)
+            self.assertEqual(by_kind["image"]["project_rotation"]["limit"], 100)
+            self.assertEqual(by_kind["image"]["project_rotation"]["project_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

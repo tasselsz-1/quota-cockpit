@@ -229,9 +229,10 @@ main { padding: 10px 12px 20px; display: flex; flex-direction: column; gap: 10px
 }
 .tag.OK { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
 .tag.EOF, .tag.E429_RPM { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
-.tag.E429, .tag.ERR, .tag.WAF { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.tag.E429, .tag.ERR, .tag.WAF, .tag.BLK { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
 .tag.WAF { background: color-mix(in srgb, var(--bad) 10%, transparent); }
-.tag.CAP { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.tag.CAP, .tag.POOL, .tag.POL, .tag.DUP, .tag.TMO, .tag.\34 29 { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.tag.POOL { background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .tag.E429_WEEKLY { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .tag.CLIENT_ERR { color: var(--dim); border-color: var(--line); }
 .tag.RUNNING { color: var(--pool-a); border-color: color-mix(in srgb, var(--pool-a) 45%, transparent); }

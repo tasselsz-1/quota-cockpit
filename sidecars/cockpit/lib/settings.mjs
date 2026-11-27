@@ -9,15 +9,19 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 
+export const FLOW_POLICY_VERSION = 2;
+
 export const DEFAULT_SETTINGS = {
   softCap: 54,
   hardCap: 60,
   tokenCap: 0,
   countMode: 'attempts',
   anchorMode: 'auto',
-  flowMaxPerHour: 6,
-  flowMaxPerDay: 20,
-  flowMaxDailyCredits: 400,
+  flowPolicyVersion: FLOW_POLICY_VERSION,
+  flowMaxRecaptcha10m: 8,
+  flowMaxPerHour: 0,
+  flowMaxPerDay: 36,
+  flowMaxDailyCredits: 600,
   flowMinCredits: 100,
   flowMinGapSec: 35,
 };
@@ -26,6 +30,27 @@ export function clampInt(val, min, max, fallback) {
   const n = Number(val);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+export function migrateLegacyFlowDefaults(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const ver = Number(raw.flowPolicyVersion ?? raw.flow_policy_version ?? 0);
+  if (Number.isFinite(ver) && ver >= FLOW_POLICY_VERSION) return raw;
+  const hr = raw.flowMaxPerHour ?? raw.flow_max_per_hour;
+  const day = raw.flowMaxPerDay ?? raw.flow_max_per_day;
+  const cr = raw.flowMaxDailyCredits ?? raw.flow_max_daily_credits;
+  // Auto-upgrade only exact v1 defaults (6 / 20 / 400); preserve any custom thresholds.
+  if (Number(hr) === 6 && Number(day) === 20 && Number(cr) === 400) {
+    return {
+      ...raw,
+      flowPolicyVersion: FLOW_POLICY_VERSION,
+      flowMaxRecaptcha10m: raw.flowMaxRecaptcha10m ?? raw.flow_max_recaptcha_10m ?? DEFAULT_SETTINGS.flowMaxRecaptcha10m,
+      flowMaxPerHour: DEFAULT_SETTINGS.flowMaxPerHour,
+      flowMaxPerDay: DEFAULT_SETTINGS.flowMaxPerDay,
+      flowMaxDailyCredits: DEFAULT_SETTINGS.flowMaxDailyCredits,
+    };
+  }
+  return raw;
 }
 
 export function normalizeSettings(raw, base = DEFAULT_SETTINGS) {
@@ -43,17 +68,24 @@ export function normalizeSettings(raw, base = DEFAULT_SETTINGS) {
   const countMode = modeRaw === 'ok_only' ? 'ok_only' : 'attempts';
   const anchorRaw = String(obj.anchorMode ?? obj.anchor_mode ?? b.anchorMode ?? DEFAULT_SETTINGS.anchorMode).trim();
   const anchorMode = anchorRaw === 'manual' ? 'manual' : 'auto';
+  const flowMaxRecaptcha10m = clampInt(
+    obj.flowMaxRecaptcha10m ?? obj.flow_max_recaptcha_10m,
+    1,
+    10,
+    b.flowMaxRecaptcha10m ?? DEFAULT_SETTINGS.flowMaxRecaptcha10m,
+  );
   const flowMaxPerHour = clampInt(
     obj.flowMaxPerHour ?? obj.flow_max_per_hour,
-    1,
+    0,
     200,
     b.flowMaxPerHour ?? DEFAULT_SETTINGS.flowMaxPerHour,
   );
+  const minFlowDay = Math.max(1, flowMaxPerHour);
   const flowMaxPerDay = clampInt(
     obj.flowMaxPerDay ?? obj.flow_max_per_day,
-    flowMaxPerHour,
+    minFlowDay,
     1000,
-    Math.max(flowMaxPerHour, b.flowMaxPerDay ?? DEFAULT_SETTINGS.flowMaxPerDay),
+    Math.max(minFlowDay, b.flowMaxPerDay ?? DEFAULT_SETTINGS.flowMaxPerDay),
   );
   const flowMaxDailyCredits = clampInt(
     obj.flowMaxDailyCredits ?? obj.flow_max_daily_credits,
@@ -79,6 +111,8 @@ export function normalizeSettings(raw, base = DEFAULT_SETTINGS) {
     tokenCap,
     countMode,
     anchorMode,
+    flowPolicyVersion: FLOW_POLICY_VERSION,
+    flowMaxRecaptcha10m,
     flowMaxPerHour,
     flowMaxPerDay,
     flowMaxDailyCredits,
@@ -93,7 +127,8 @@ export function createSettingsStore(settingsPath) {
   function load() {
     try {
       if (existsSync(settingsPath)) {
-        return normalizeSettings(JSON.parse(readFileSync(settingsPath, 'utf8')));
+        const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        return normalizeSettings(migrateLegacyFlowDefaults(parsed));
       }
     } catch {
       // fallback to defaults

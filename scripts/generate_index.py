@@ -55,7 +55,7 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
         "`renderContext`, `renderCacheCard`, `renderCacheOverviewStrip`, `renderStepsCard`, `renderStepsOverviewStrip`",
     ),
     (
-        "Google Flow Video tab & overview card UI",
+        "Google Flow cross-modal Video/Image tab & overview card UI",
         "`sidecars/cockpit/web/js/render-flow.js`, `sidecars/cockpit/web/js/actions.js`",
         "`renderFlow`, `renderFlowOverviewCard`, `saveFlowSettings`, `syncFlowCredits`",
     ),
@@ -80,9 +80,9 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
         "`app.api(...)`, `registerWebAssets`, `collectWebAssets`",
     ),
     (
-        "Settings defaults, clamping & quota history store",
+        "Settings defaults, v2 Flow migration, clamping & quota history store",
         "`sidecars/cockpit/lib/settings.mjs`",
-        "`DEFAULT_SETTINGS`, `clampInt`, `normalizeSettings`, `createSettingsStore`, `createQuotaHistoryStore`",
+        "`DEFAULT_SETTINGS`, `FLOW_POLICY_VERSION`, `migrateLegacyFlowDefaults`, `clampInt`, `normalizeSettings`, `createSettingsStore`, `createQuotaHistoryStore`",
     ),
     (
         "Antigravity LS RPC & pool refresh cache",
@@ -130,14 +130,14 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
         "`scan_workspace_ledgers`, `compute_anchor`, `build_report`",
     ),
     (
-        "Flow video models, pricing & gflow binary discovery",
+        "Flow video/image models, 4 daily pools, 10m WAF constants & gflow discovery",
         "`sidecars/cockpit/flow_quota/constants.py`",
-        "`VIDEO_MODELS`, `MODEL_BY_ID`, `find_gflow_bin`, `canonical_model_id`",
+        "`VIDEO_MODELS`, `IMAGE_QUOTA_POOLS`, `MODEL_BY_ID`, `is_peak_hours`, `infer_image_quota_pool`, `find_gflow_bin`, `canonical_model_id`",
     ),
     (
-        "Flow read-only ledger, gflow.db, locks & workspace runs",
+        "Flow read-only v2 ledger, gflow.db, locks & workspace video/image runs",
         "`sidecars/cockpit/flow_quota/readers.py`",
-        "`read_ledger`, `read_gflow_db`, `inspect_profile_locks`, `scan_workspace_flow_runs`",
+        "`read_ledger`, `read_gflow_db`, `inspect_profile_locks`, `inspect_single_flight_lock`, `scan_workspace_flow_runs`",
     ),
     (
         "Flow manual live credit sync & structlog stripping",
@@ -145,9 +145,9 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
         "`parse_gflow_json_stdout`, `sync_live_credits`",
     ),
     (
-        "Flow 1h/24h anti-throttle rolling buckets & circuit breaker",
+        "Flow 10m WAF wall, 0-credit image pools, 24h video caps & circuit breakers",
         "`sidecars/cockpit/flow_quota/report.py`",
-        "`build_rolling_buckets`, `compute_breaker`, `merge_profiles`, `build_report`",
+        "`build_rolling_buckets`, `compute_breaker`, `compute_model_breakers`, `merge_profiles`, `build_report`",
     ),
     (
         "Conversation protobuf decoding & cache hit analytics",
@@ -172,7 +172,7 @@ ROUTING_ROWS: list[tuple[str, str, str]] = [
 ]
 
 DATA_FILES: list[tuple[str, str, str]] = [
-    ("`settings.json`", "`ANTIGRAVITY_EXECUTABLE_DATA_DIR`", "User soft/hard image caps, count/anchor mode, and Flow 1h/24h/credit/gap settings (`lib/settings.mjs`)."),
+    ("`settings.json`", "`ANTIGRAVITY_EXECUTABLE_DATA_DIR`", "User soft/hard image caps, count/anchor mode, and Flow v2 10m WAF/1h/24h/credit/gap settings (`lib/settings.mjs`)."),
     ("`model-catalog.json`", "`ANTIGRAVITY_EXECUTABLE_DATA_DIR`", "Cached LS `GetAvailableModels` catalog snapshot merged into pool & context lookups."),
     ("`image-scan-cache.json`", "`ANTIGRAVITY_EXECUTABLE_DATA_DIR`", "Incremental SQLite scan cache keyed by conversation DB stamp (`image_quota/scanner.py`)."),
     ("`image-calibration.json`", "`ANTIGRAVITY_EXECUTABLE_DATA_DIR`", "30-day self-learning safe/429 peak ledger, truncated lock history, and pinned peak (`image_quota/calibration.py`)."),
@@ -183,10 +183,11 @@ DATA_FILES: list[tuple[str, str, str]] = [
 
 READONLY_SOURCES: list[tuple[str, str]] = [
     ("`conversations/*.db`", "Antigravity SQLite conversation DBs (`steps`, `gen_metadata`) read via `?mode=ro` for context, image quota, and pool usage."),
-    ("`gflow.db`", "Local `gflow-cli` SQLite database read via `?mode=ro` for profiles, video operations, model counts, and WAF/error telemetry."),
-    ("`gflow_traffic_ledger.json`", "Local Flow traffic ledger (`GFLOW_TRAFFIC_LEDGER` or `~/.gemini/gflow_traffic_ledger.json`) tracking 1h/24h/credit burn."),
+    ("`gflow.db`", "Local `gflow-cli` SQLite database read via `?mode=ro` for profiles, video/image operations, model counts, and WAF/error telemetry."),
+    ("`gflow_traffic_ledger.json`", "Local cross-modal Flow v2 traffic ledger (`GFLOW_TRAFFIC_LEDGER` or `~/.gemini/gflow_traffic_ledger.json`) tracking 10m WAF tokens, 0-credit image pools, 24h video/credit burn, and global/per-pool breakers."),
+    ("`gflow_single_flight.lock`", "Global cross-modal single-flight PID lock (`~/.gemini/gflow_single_flight.lock`) inspected read-only by `flow_quota/readers.py`."),
     ("`api_call_ledger.json`", "Workspace image generation call ledger linked by `image_quota/report.py`."),
-    ("`flow_run_state.json`", "Workspace Flow runner state files discovered by `flow_quota/readers.py`."),
+    ("`flow_run_state.json` / `flow_image_state.json` / `flow_project_index.json`", "Workspace Flow video/image runner state & project rotation files discovered by `flow_quota/readers.py`."),
 ]
 
 FILE_DESCRIPTIONS: dict[str, str] = {
@@ -199,7 +200,7 @@ FILE_DESCRIPTIONS: dict[str, str] = {
     "sidecars/cockpit/web/js/render-image.js": "Image Quota tab: anchor gauge, rolling schedules, calibration, and settings form.",
     "sidecars/cockpit/web/js/render-pools.js": "Model Quota Pools tab: Pool A/B windows, model list, and 7d weekly recovery.",
     "sidecars/cockpit/web/js/render-context.js": "Context & Prompt Cache tab: 100-dot grid, cache hit analytics, and file sections.",
-    "sidecars/cockpit/web/js/render-flow.js": "Google Flow tab: synced credits, 1h/24h rolling caps, breaker status, and settings.",
+    "sidecars/cockpit/web/js/render-flow.js": "Google Flow tab: 10m cross-modal WAF wall, 0-credit image/upscale pools, synced credits, 24h video caps, breakers, and settings.",
     "sidecars/cockpit/web/js/actions.js": "Frontend API actions for settings, Flow sync, peak pinning, calibration reset, and refresh.",
     "sidecars/cockpit/web/js/app.js": "DOM diff renderer, tab router, event delegation, and polling loop.",
     "sidecars/cockpit/main.mjs": "Sidecar HTTP API server wiring static assets, pools, and Python report services.",
@@ -222,9 +223,9 @@ FILE_DESCRIPTIONS: dict[str, str] = {
     "sidecars/cockpit/context_parser/protobuf.py": "Lightweight protobuf varint/wire decoder and step type constants.",
     "sidecars/cockpit/context_parser/renderer.py": "CLI text report and JSON loader for conversation context usage.",
     "sidecars/cockpit/flow_quota/__init__.py": "Subpackage facade re-exporting Flow quota constants, readers, sync, and report APIs.",
-    "sidecars/cockpit/flow_quota/constants.py": "Flow video model specs, credit pricing, defaults, and gflow binary lookup.",
-    "sidecars/cockpit/flow_quota/readers.py": "Read-only readers for Flow ledger, `gflow.db`, profile locks, and workspace runs.",
-    "sidecars/cockpit/flow_quota/report.py": "Flow 1h/24h rolling buckets, circuit breaker computation, and report builder.",
+    "sidecars/cockpit/flow_quota/constants.py": "Flow video/image model specs, 4 daily pools, 10m WAF defaults, peak-hour check, and gflow binary lookup.",
+    "sidecars/cockpit/flow_quota/readers.py": "Read-only readers for Flow v2 ledger, `gflow.db`, single-flight/profile locks, and workspace video/image runs.",
+    "sidecars/cockpit/flow_quota/report.py": "Flow 10m WAF wall, 0-credit image daily pools, 24h video rolling buckets, global/per-pool breakers, and report builder.",
     "sidecars/cockpit/flow_quota/sync.py": "Manual live credit sync via `gflow` CLI with structlog filtering.",
     "sidecars/cockpit/image_quota/__init__.py": "Subpackage facade re-exporting image quota constants, scanner, schedules, and calibration.",
     "sidecars/cockpit/image_quota/calibration.py": "30-day self-learning 429/safe watermark calibration, ledger, and peak pinning.",

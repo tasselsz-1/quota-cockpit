@@ -10,7 +10,9 @@ import {
 } from '../sidecars/cockpit/lib/runner.mjs';
 import {
   DEFAULT_SETTINGS,
+  FLOW_POLICY_VERSION,
   clampInt,
+  migrateLegacyFlowDefaults,
   normalizeSettings,
 } from '../sidecars/cockpit/lib/settings.mjs';
 
@@ -95,6 +97,8 @@ test('normalizeSettings incremental merge preserves flow settings when saving im
   assert.equal(afterImageSave.hardCap, 55);
   assert.equal(afterImageSave.countMode, 'ok_only');
   assert.equal(afterImageSave.anchorMode, 'manual');
+  assert.equal(afterImageSave.flowPolicyVersion, FLOW_POLICY_VERSION);
+  assert.equal(afterImageSave.flowMaxRecaptcha10m, DEFAULT_SETTINGS.flowMaxRecaptcha10m);
   assert.equal(afterImageSave.flowMaxPerHour, DEFAULT_SETTINGS.flowMaxPerHour);
   assert.equal(afterImageSave.flowMaxPerDay, DEFAULT_SETTINGS.flowMaxPerDay);
   assert.equal(afterImageSave.flowMaxDailyCredits, DEFAULT_SETTINGS.flowMaxDailyCredits);
@@ -102,18 +106,60 @@ test('normalizeSettings incremental merge preserves flow settings when saving im
   assert.equal(afterImageSave.flowMinGapSec, DEFAULT_SETTINGS.flowMinGapSec);
 
   const afterFlowSave = normalizeSettings(
-    { flowMaxPerHour: 10, flowMaxPerDay: 30, flowMaxDailyCredits: 600, flowMinCredits: 150, flowMinGapSec: 45 },
+    { flowMaxRecaptcha10m: 6, flowMaxPerHour: 0, flowMaxPerDay: 30, flowMaxDailyCredits: 500, flowMinCredits: 150, flowMinGapSec: 45 },
     afterImageSave,
   );
   assert.equal(afterFlowSave.softCap, 42);
   assert.equal(afterFlowSave.hardCap, 55);
   assert.equal(afterFlowSave.countMode, 'ok_only');
   assert.equal(afterFlowSave.anchorMode, 'manual');
-  assert.equal(afterFlowSave.flowMaxPerHour, 10);
+  assert.equal(afterFlowSave.flowMaxRecaptcha10m, 6);
+  assert.equal(afterFlowSave.flowMaxPerHour, 0);
   assert.equal(afterFlowSave.flowMaxPerDay, 30);
-  assert.equal(afterFlowSave.flowMaxDailyCredits, 600);
+  assert.equal(afterFlowSave.flowMaxDailyCredits, 500);
   assert.equal(afterFlowSave.flowMinCredits, 150);
   assert.equal(afterFlowSave.flowMinGapSec, 45);
+});
+
+test('migrateLegacyFlowDefaults upgrades exact v1 defaults while preserving custom user settings', () => {
+  const legacyExact = {
+    softCap: 54,
+    hardCap: 60,
+    flowMaxPerHour: 6,
+    flowMaxPerDay: 20,
+    flowMaxDailyCredits: 400,
+    flowMinCredits: 100,
+    flowMinGapSec: 35,
+  };
+  const upgraded = normalizeSettings(migrateLegacyFlowDefaults(legacyExact), DEFAULT_SETTINGS);
+  assert.equal(upgraded.flowPolicyVersion, FLOW_POLICY_VERSION);
+  assert.equal(upgraded.flowMaxRecaptcha10m, 8);
+  assert.equal(upgraded.flowMaxPerHour, 0);
+  assert.equal(upgraded.flowMaxPerDay, 36);
+  assert.equal(upgraded.flowMaxDailyCredits, 600);
+
+  const legacyCustom = {
+    flowMaxPerHour: 10,
+    flowMaxPerDay: 20,
+    flowMaxDailyCredits: 400,
+  };
+  const keptCustom = normalizeSettings(migrateLegacyFlowDefaults(legacyCustom), DEFAULT_SETTINGS);
+  assert.equal(keptCustom.flowMaxPerHour, 10);
+  assert.equal(keptCustom.flowMaxPerDay, 20);
+  assert.equal(keptCustom.flowMaxDailyCredits, 400);
+
+  const alreadyV2 = {
+    flowPolicyVersion: FLOW_POLICY_VERSION,
+    flowMaxRecaptcha10m: 6,
+    flowMaxPerHour: 6,
+    flowMaxPerDay: 20,
+    flowMaxDailyCredits: 400,
+  };
+  const keptV2 = normalizeSettings(migrateLegacyFlowDefaults(alreadyV2), DEFAULT_SETTINGS);
+  assert.equal(keptV2.flowMaxRecaptcha10m, 6);
+  assert.equal(keptV2.flowMaxPerHour, 6);
+  assert.equal(keptV2.flowMaxPerDay, 20);
+  assert.equal(keptV2.flowMaxDailyCredits, 400);
 });
 
 test('clampInt clamps within bounds, rounds numbers, and falls back on non-finite input', () => {

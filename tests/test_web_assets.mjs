@@ -207,9 +207,11 @@ function buildFixtureDashboard() {
       hardCap: 60,
       tokenCap: 0,
       countMode: 'attempts',
-      flowMaxPerHour: 6,
-      flowMaxPerDay: 20,
-      flowMaxDailyCredits: 400,
+      flowPolicyVersion: 2,
+      flowMaxRecaptcha10m: 8,
+      flowMaxPerHour: 0,
+      flowMaxPerDay: 36,
+      flowMaxDailyCredits: 600,
       flowMinCredits: 100,
       flowMinGapSec: 35,
     },
@@ -366,28 +368,60 @@ function buildFixtureDashboard() {
         profiles: [{ profile: 'default', is_default: true, cookies_present: true, credits: 1200 }],
       },
       rolling: {
-        hour_used: 1,
-        hour_limit: 6,
-        hour_pct: 17,
+        waf_window_tokens: 2,
+        waf_video_tokens: 1,
+        waf_image_tokens: 1,
+        waf_effective_limit: 8,
+        waf_configured_limit: 8,
+        waf_pct: 25,
+        waf_next_recover_ts: now + 300,
+        waf_full_clear_ts: now + 500,
+        waf_schedule: [{ recover_ts: now + 300, count: 2, credits: 10 }],
+        is_peak_hours: false,
+        recent_waf_recovery: false,
+        hour_enabled: false,
+        hour_used: 2,
+        hour_limit: 0,
+        hour_pct: 0,
         day_used: 4,
-        day_limit: 20,
-        day_pct: 20,
+        day_character_used: 0,
+        day_limit: 36,
+        day_pct: 11,
         day_credits_used: 40,
-        day_credits_limit: 400,
-        day_credits_pct: 10,
-        day_credits_remaining: 360,
-        bottleneck_pct: 20,
+        day_credits_limit: 600,
+        day_credits_pct: 7,
+        day_credits_remaining: 560,
+        bottleneck_pct: 25,
         hour_next_recover_ts: now + 1800,
         hour_full_clear_ts: now + 1800,
         day_next_recover_ts: now + 36000,
         min_gap_wait_sec: 0,
+        effective_s2s_gap_sec: 75,
       },
       breaker: { open: false, requires_manual_reset: false },
-      policy: { min_gap_sec: 35 },
+      model_breakers: {},
+      image_quota: {
+        daily_image_submits: 6,
+        heat_rest_every: 80,
+        heat_rest_due: false,
+        pools: [
+          { id: 'nano_pro', label: 'Nano Banana Pro', used: 8, submits: 2, cap: 500, pct: 2, remaining: 492, unit: '张', note: 'Pro (hero)', breaker: null },
+          { id: 'nano2_shared', label: 'Nano Banana 2.1 / 2 Lite', used: 16, submits: 4, cap: 1000, pct: 2, remaining: 984, unit: '张', note: '2.1 + 2 Lite 共享池', breaker: null },
+          { id: 'image_upscale_2k', label: '图片 2K 放大', used: 0, submits: 0, cap: 200, pct: 0, remaining: 200, unit: '次', note: '2K 独立日池', breaker: null },
+          { id: 'image_upscale_4k', label: '图片 4K 放大', used: 2, submits: 2, cap: 200, pct: 1, remaining: 198, unit: '次', note: '4K 独立日池', breaker: null },
+        ],
+      },
+      locks: { profile_busy: false, profile_detail: '', single_flight: { present: false, active: false, pid: 0, age_sec: 0, detail: '' } },
+      policy: { min_gap_sec: 35, max_recaptcha_10m: 8, effective_max_recaptcha_10m: 8, max_per_hour: 0 },
       model_estimates: [{ id: 'veo_3_1_lite', label: 'Veo 3.1 Lite', max_duration: 8, ref_cap: 3, unit_credits: 10, est_segments: 108, recent_30d_ok: 4, recent_30d_fail: 0 }],
       retiring_models: [],
-      usage: { window_7d: { total: 4, ok: 4, failed: 0, waf: 0 }, window_30d: { total: 10, ok: 10, failed: 0, character_total: 2 }, by_model_30d: [] },
-      data_sources: { rate_limit_source: 'ledger' },
+      usage: {
+        window_7d: { total: 4, ok: 4, failed: 0, waf: 0, image_total: 6, image_ok: 6 },
+        window_30d: { total: 10, ok: 10, failed: 0, character_total: 2, image_total: 12, image_ok: 12 },
+        by_model_30d: [],
+        by_image_model_30d: [{ model: 'nano2', label: 'Nano Banana 2.1', ok: 12, failed: 0, total: 12 }],
+      },
+      data_sources: { rate_limit_source: 'ledger', ledger_version: 2 },
       workspace_runs: [],
       recent_events: [],
     },
@@ -501,6 +535,14 @@ test('end-to-end VM execution of all 10 classic scripts renders all 5 tabs witho
   assert.ok(ovStepsIdx > ovCacheIdx, 'Steps strip must appear directly AFTER Prompt cache strip in Overview HTML');
   assert.ok(overviewHtml.includes('本段 12 步') && overviewHtml.includes('1,581'), 'Overview steps strip must show segment and total step counts');
   assert.ok(flowCardIdx > ovStepsIdx, 'Flow card must appear AFTER Context/Steps card in rendered Overview HTML');
+  assert.ok(overviewHtml.includes('10m WAF'), 'Overview Flow card must display 10m WAF cross-modal meter');
+
+  QC.setTab('flow');
+  const flowHtml = viewEl.innerHTML;
+  assert.ok(flowHtml.includes('10 分钟合并 WAF 令牌'), 'Flow tab must render 10m cross-modal WAF wall');
+  assert.ok(flowHtml.includes('Flow 0 积分生图与放大日池'), 'Flow tab must render 0-credit image & upscale daily pools');
+  assert.ok(flowHtml.includes('Nano Banana 2.1'), 'Flow tab must display image pool labels');
+  assert.ok(flowHtml.includes('1 小时视频硬限已关闭'), 'Flow tab must indicate disabled 1h hard cap when hour_limit is 0');
 
   QC.setTab('context');
   const contextHtml = viewEl.innerHTML;

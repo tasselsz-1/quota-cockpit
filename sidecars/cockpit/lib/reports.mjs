@@ -112,6 +112,7 @@ export function createReportsService({
       flowScript,
       '--ledger', flowLedgerPath,
       '--credits-cache', flowCreditsCachePath,
+      '--max-recaptcha-10m', String(s.flowMaxRecaptcha10m ?? 8),
       '--max-per-hour', String(s.flowMaxPerHour),
       '--max-per-day', String(s.flowMaxPerDay),
       '--max-daily-credits', String(s.flowMaxDailyCredits),
@@ -125,7 +126,7 @@ export function createReportsService({
 
   function flowCacheKey(workspace) {
     const s = getSettings();
-    return `${workspace}|${s.flowMaxPerHour}|${s.flowMaxPerDay}|${s.flowMaxDailyCredits}|${s.flowMinCredits}|${s.flowMinGapSec}`;
+    return `${workspace}|${s.flowMaxRecaptcha10m ?? 8}|${s.flowMaxPerHour}|${s.flowMaxPerDay}|${s.flowMaxDailyCredits}|${s.flowMinCredits}|${s.flowMinGapSec}`;
   }
 
   async function getFlowQuotaReport(workspaceUri, force = false) {

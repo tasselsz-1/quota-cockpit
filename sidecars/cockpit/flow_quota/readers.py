@@ -14,6 +14,8 @@ from typing import Any
 from .constants import (
     CREDITS_HISTORY_MAX,
     DAY_SEC,
+    DEFAULT_PROJECT_ROTATE_SEGMENTS,
+    DEFAULT_PROJECT_ROTATE_TILES,
     MONTH_SEC,
     WORKSPACE_SKIP_DIRS,
     canonical_model_id,
@@ -72,23 +74,79 @@ def inspect_profile_locks(gflow_dir: Path, now: float) -> tuple[bool, str]:
     return False, ""
 
 
+def inspect_single_flight_lock(lock_path: Path, now: float) -> dict[str, Any]:
+    """Read-only inspection of the shared ~/.gemini/gflow_single_flight.lock file."""
+    res: dict[str, Any] = {
+        "present": False,
+        "active": False,
+        "pid": 0,
+        "age_sec": 0,
+        "detail": "",
+        "path": str(lock_path),
+    }
+    if not lock_path.is_file():
+        return res
+    res["present"] = True
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="ignore").strip()
+        pid = 0
+        lock_ts = 0.0
+        if raw.startswith("{"):
+            data = json.loads(raw)
+            pid = safe_int(data.get("pid"), 0)
+            lock_ts = safe_float(data.get("ts"), 0.0) or parse_iso_ts(data.get("created_at"))
+        else:
+            m = re.search(r"\b(\d{2,7})\b", raw)
+            if m:
+                pid = safe_int(m.group(1), 0)
+        if lock_ts <= 0:
+            lock_ts = lock_path.stat().st_mtime
+        age_sec = max(0, int(round(now - lock_ts)))
+        res["pid"] = pid
+        res["age_sec"] = age_sec
+        if pid > 0 and pid != os.getpid() and is_pid_alive(pid):
+            res["active"] = True
+            res["detail"] = f"全局单飞锁占用 (PID {pid})"
+        elif pid == 0 and age_sec < 30:
+            res["active"] = True
+            res["detail"] = "全局单飞锁活跃"
+    except Exception:
+        pass
+    return res
+
+
 def read_ledger(ledger_path: Path) -> dict[str, Any]:
+    empty = {
+        "present": False,
+        "version": 1,
+        "breaker": {},
+        "model_breakers": {},
+        "last_waf_ts": 0.0,
+        "last_heat_rest_ts": 0.0,
+        "events": [],
+        "updated_at": "",
+    }
     if not ledger_path.is_file():
-        return {"present": False, "breaker": {}, "events": [], "updated_at": ""}
+        return empty
     try:
         raw = json.loads(ledger_path.read_text(encoding="utf-8", errors="replace"))
         if not isinstance(raw, dict):
-            return {"present": True, "breaker": {}, "events": [], "updated_at": "", "parse_error": "invalid_root"}
+            return {**empty, "present": True, "parse_error": "invalid_root"}
         events = raw.get("events") if isinstance(raw.get("events"), list) else []
         breaker = raw.get("breaker") if isinstance(raw.get("breaker"), dict) else {}
+        model_breakers = raw.get("model_breakers") if isinstance(raw.get("model_breakers"), dict) else {}
         return {
             "present": True,
+            "version": safe_int(raw.get("version"), 1),
             "breaker": breaker,
+            "model_breakers": model_breakers,
+            "last_waf_ts": safe_float(raw.get("last_waf_ts"), 0.0),
+            "last_heat_rest_ts": safe_float(raw.get("last_heat_rest_ts"), 0.0),
             "events": [e for e in events if isinstance(e, dict)],
             "updated_at": str(raw.get("updated_at") or ""),
         }
     except Exception as exc:
-        return {"present": True, "breaker": {}, "events": [], "updated_at": "", "parse_error": str(exc)}
+        return {**empty, "present": True, "parse_error": str(exc)}
 
 
 def read_credits_cache(cache_path: Path) -> dict[str, Any]:
@@ -224,6 +282,34 @@ def read_gflow_db(gflow_dir: Path, now: float) -> dict[str, Any]:
     return result
 
 
+def _read_video_project_rotation(ep_dir: Path) -> dict[str, Any] | None:
+    idx_file = ep_dir / "flow_project_index.json"
+    if not idx_file.is_file():
+        return None
+    try:
+        raw = json.loads(idx_file.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(raw, dict):
+            return None
+        projects = raw.get("projects") if isinstance(raw.get("projects"), dict) else {}
+        active_pid = str(raw.get("active_project_id") or "").strip()
+        rotate_limit = max(1, safe_int(raw.get("rotate_every_segments"), DEFAULT_PROJECT_ROTATE_SEGMENTS))
+        active_entry = projects.get(active_pid) if active_pid else None
+        if not isinstance(active_entry, dict) and projects:
+            active_entry = next(
+                (v for v in projects.values() if isinstance(v, dict) and v.get("status") == "active"),
+                None,
+            )
+        used = max(0, safe_int((active_entry or {}).get("submitted_count"), 0))
+        return {
+            "used": used,
+            "limit": rotate_limit,
+            "unit": "段",
+            "project_count": len(projects),
+        }
+    except Exception:
+        return None
+
+
 def scan_workspace_flow_runs(workspace: str, max_depth: int = 5) -> list[dict[str, Any]]:
     if not workspace:
         return []
@@ -242,46 +328,107 @@ def scan_workspace_flow_runs(workspace: str, max_depth: int = 5) -> list[dict[st
             ]
             if depth >= max_depth:
                 dirnames[:] = []
-            if "flow_run_state.json" not in filenames:
-                continue
-            state_file = cur / "flow_run_state.json"
-            try:
-                raw = json.loads(state_file.read_text(encoding="utf-8", errors="replace"))
-                segs = raw.get("segments") if isinstance(raw.get("segments"), dict) else {}
-                counts = {"done": 0, "upscaled": 0, "pending": 0, "failed": 0, "uncertain": 0, "blocked": 0}
-                credits_used = 0.0
-                for seg in segs.values():
-                    if not isinstance(seg, dict):
-                        continue
-                    st = str(seg.get("status") or "PENDING").upper()
-                    credits_used += max(0.0, safe_float(seg.get("credits_used"), 0.0))
-                    if st == "DONE":
-                        counts["done"] += 1
-                    elif st == "UPSCALED":
-                        counts["upscaled"] += 1
-                    elif st == "IN_FLIGHT_UNCERTAIN":
-                        counts["uncertain"] += 1
-                    elif st == "FAILED":
-                        counts["failed"] += 1
-                    elif st == "BLOCKED_CREDITS":
-                        counts["blocked"] += 1
+            if "flow_run_state.json" in filenames:
+                state_file = cur / "flow_run_state.json"
+                try:
+                    raw = json.loads(state_file.read_text(encoding="utf-8", errors="replace"))
+                    segs = raw.get("segments") if isinstance(raw.get("segments"), dict) else {}
+                    counts = {"done": 0, "upscaled": 0, "pending": 0, "failed": 0, "uncertain": 0, "blocked": 0}
+                    credits_used = 0.0
+                    for seg in segs.values():
+                        if not isinstance(seg, dict):
+                            continue
+                        st = str(seg.get("status") or "PENDING").upper()
+                        credits_used += max(0.0, safe_float(seg.get("credits_used"), 0.0))
+                        if st == "DONE":
+                            counts["done"] += 1
+                        elif st == "UPSCALED":
+                            counts["upscaled"] += 1
+                        elif st == "IN_FLIGHT_UNCERTAIN":
+                            counts["uncertain"] += 1
+                        elif st == "FAILED":
+                            counts["failed"] += 1
+                        elif st == "BLOCKED_CREDITS":
+                            counts["blocked"] += 1
+                        else:
+                            counts["pending"] += 1
+                    rel = str(state_file.relative_to(root)).replace("\\", "/")
+                    entry: dict[str, Any] = {
+                        "kind": "video",
+                        "episode": cur.name,
+                        "path": rel,
+                        "total": len(segs),
+                        "completed": counts["done"] + counts["upscaled"],
+                        "counts": counts,
+                        "credits_used": round(credits_used, 1),
+                        "updated_at": str(raw.get("updated_at") or ""),
+                    }
+                    proj_rot = _read_video_project_rotation(cur)
+                    if proj_rot is not None:
+                        entry["project_rotation"] = proj_rot
+                    found.append(entry)
+                except Exception:
+                    pass
+            if "flow_image_state.json" in filenames:
+                img_state_file = cur / "flow_image_state.json"
+                try:
+                    raw = json.loads(img_state_file.read_text(encoding="utf-8", errors="replace"))
+                    jobs = raw.get("jobs") if isinstance(raw.get("jobs"), dict) else {}
+                    counts = {"done": 0, "upscaled": 0, "pending": 0, "failed": 0, "uncertain": 0, "blocked": 0}
+                    latest_upd = str(raw.get("updated_at") or "")
+                    cur_pid = str(raw.get("flow_project_id") or "").strip()
+                    inferred_tiles = 0
+                    for job in jobs.values():
+                        if not isinstance(job, dict):
+                            continue
+                        st = str(job.get("status") or "PENDING").upper()
+                        j_upd = str(job.get("updated_at") or "")
+                        if j_upd and j_upd > latest_upd:
+                            latest_upd = j_upd
+                        if st == "DONE":
+                            if str(job.get("upscaled_scale") or "").strip():
+                                counts["upscaled"] += 1
+                            else:
+                                counts["done"] += 1
+                            if cur_pid and str(job.get("project_id") or "") == cur_pid:
+                                inferred_tiles += max(1, safe_int(job.get("count"), 1))
+                        elif st in ("QUOTA_DEFERRED", "BLOCKED"):
+                            counts["blocked"] += 1
+                        elif st in ("FAILED", "CONTENT_POLICY", "SAME_IMAGE_BLOCKED"):
+                            counts["failed"] += 1
+                        else:
+                            counts["pending"] += 1
+                    raw_tiles = raw.get("flow_project_tiles")
+                    if raw_tiles is not None:
+                        used_tiles = max(0, safe_int(raw_tiles, 0))
+                    elif raw.get("flow_project_count") is not None:
+                        used_tiles = max(0, safe_int(raw.get("flow_project_count"), 0))
                     else:
-                        counts["pending"] += 1
-                rel = str(state_file.relative_to(root)).replace("\\", "/")
-                found.append({
-                    "episode": cur.name,
-                    "path": rel,
-                    "total": len(segs),
-                    "completed": counts["done"] + counts["upscaled"],
-                    "counts": counts,
-                    "credits_used": round(credits_used, 1),
-                    "updated_at": str(raw.get("updated_at") or ""),
-                })
-                if len(found) >= 12:
-                    break
-            except Exception:
-                continue
+                        used_tiles = inferred_tiles
+                    hist = raw.get("flow_project_history") if isinstance(raw.get("flow_project_history"), list) else []
+                    proj_cnt = len(hist) + (1 if cur_pid else 0)
+                    rel = str(img_state_file.relative_to(root)).replace("\\", "/")
+                    found.append({
+                        "kind": "image",
+                        "episode": cur.name,
+                        "path": rel,
+                        "total": len(jobs),
+                        "completed": counts["done"] + counts["upscaled"],
+                        "counts": counts,
+                        "credits_used": 0.0,
+                        "project_rotation": {
+                            "used": used_tiles,
+                            "limit": DEFAULT_PROJECT_ROTATE_TILES,
+                            "unit": "tiles",
+                            "project_count": proj_cnt,
+                        },
+                        "updated_at": latest_upd,
+                    })
+                except Exception:
+                    pass
+            if len(found) >= 16:
+                break
     except Exception:
         pass
     found.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-    return found
+    return found[:12]
